@@ -1,0 +1,119 @@
+%% 视频合并App 增量设计 — 类图
+%% 对应《视频合并app-增量设计-2026-07-06.md》Part A §3
+
+classDiagram
+    %% ===== 共享类型（src/shared/types.ts，单一来源）=====
+    class AppConfig {
+        +string inputFolder
+        +string outputFolder
+        +string outputFileName
+    }
+    class FlvFile {
+        +string name
+        +string path
+        +number size
+        +string modifiedAt
+    }
+    class FileInfo {
+        +string date
+        +string time
+        +string title
+        +number timestamp
+    }
+    class FolderGroup {
+        +string key
+        +string folderName
+        +string folderPath
+        +number fileCount
+        +number totalSize
+        +FlvFile[] files
+        +string date
+        +string title
+    }
+    class ScanResult {
+        +string rootPath
+        +FolderGroup[] folders
+    }
+    class VideoInfo {
+        +number duration
+        +string codec
+        +number width
+        +number height
+    }
+    class IpcResult~T~ {
+        +boolean success
+        +T data
+        +string message
+    }
+    class ProgressState {
+        +number mergeProgress
+        +number convertProgress
+    }
+    FileInfo --|> FlvFile
+
+    %% ===== 共享常量（src/shared/constants.ts）=====
+    class Constants {
+        <<static>>
+        +number DEFAULT_MAX_INTERVAL_HOURS = 2.5
+        +number PROGRESS_POLL_INTERVAL_MS = 300
+        +number MERGE_TIMEOUT_MS = 1800000
+        +number PROGRESS_MAX_PERCENT = 99.9
+        +string CSP_POLICY
+        +string[] BLOCKED_PATH_ROOTS
+        +Set~string~ ALLOWED_IPC_CHANNELS
+        +string USER_DATA_ENV_KEY
+        +string LEGACY_USER_DATA_RELATIVE
+        +string CONFIG_FILE_NAME
+    }
+
+    %% ===== 安全与迁移（src/main）=====
+    class IpcValidator {
+        +validateFolderPath(p: string): ValidationResult
+        +validateOutputPath(p: string): ValidationResult
+        +safeHandle(channel: string, handler): void
+    }
+    class UserDataMigrator {
+        +resolveUserDataPath(): string
+        +migrateLegacyUserData(): Promise~void~
+        -getLegacyConfigPath(): string
+    }
+
+    %% ===== 主进程业务 =====
+    class ConfigService {
+        +loadConfig(): AppConfig
+        +saveConfig(c: AppConfig): void
+        -getConfigPath(): string
+    }
+    class ScanService {
+        +scanFlvFiles(dir: string, maxHours: number): Promise~ScanResult~
+        -scanDirAsync(dir: string): Promise~FileInfo[]~
+        -hasMergedVideo(dir: string, date: string, title: string): Promise~boolean~
+        -groupFiles(files: FileInfo[], maxHours: number): FolderGroup[]
+        -parseFileName(name: string): ParsedName
+    }
+    class FfmpegService {
+        +ffmpegProbe(p: string): Promise~VideoInfo~
+        +getVideoInfo(p: string): Promise~VideoInfo~
+        +mergeVideos(paths: string[], out: string, onProgress?): Promise~string|undefined~
+        +convertToMp4(in: string, out: string, onProgress?): Promise~void~
+    }
+
+    %% ===== preload =====
+    class ApiBridge {
+        +invokeApi~T~(channel: string, ...args): Promise~T~
+        +api: ApiSurface
+    }
+
+    %% ===== 关系 =====
+    ScanService ..> FlvFile : produces
+    ScanService ..> FolderGroup : produces
+    ScanService ..> FileInfo : produces
+    ScanService ..> Constants : uses MAX_INTERVAL
+    ConfigService ..> AppConfig : reads/writes
+    ConfigService ..> UserDataMigrator : resolves path
+    FfmpegService ..> VideoInfo : returns
+    FfmpegService ..> Constants : uses TIMEOUT/MAX_PERCENT
+    IpcValidator ..> Constants : uses ALLOWED/BLOCKED
+    ApiBridge ..> IpcValidator : (via main safeHandle)
+    ScanResult *-- FolderGroup
+    FolderGroup *-- FlvFile

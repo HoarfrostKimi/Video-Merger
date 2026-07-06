@@ -16,6 +16,7 @@ interface AppConfig {
   inputFolder?: string
   outputFolder?: string
   outputFileName?: string
+  darkMode?: boolean
 }
 
 function getConfigPath(): string {

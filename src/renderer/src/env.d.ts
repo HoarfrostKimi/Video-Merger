@@ -27,6 +27,7 @@ interface AppConfig {
   inputFolder?: string
   outputFolder?: string
   outputFileName?: string
+  darkMode?: boolean
 }
 
 interface FlvFile {

@@ -1,13 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input } from 'antd'
-import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, FileOutlined, ClearOutlined, FolderOutlined } from '@ant-design/icons'
+import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
 
-function Home(): JSX.Element {
+interface HomeProps {
+  darkMode: boolean
+  onToggleDarkMode: (value: boolean) => void
+}
+
+function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [inputFolder, setInputFolder] = useState('')
   const [outputFolder, setOutputFolder] = useState('')
   const [folders, setFolders] = useState<FolderGroup[]>([])
@@ -169,6 +174,16 @@ function Home(): JSX.Element {
 
     setProgress(100)
     setStatusText('')
+
+    // 合并完成后自动打开输出文件夹
+    if (successCount > 0 && window.api && outputFolder) {
+      try {
+        await window.api.openDirectory(outputFolder)
+      } catch {
+        // ignore
+      }
+    }
+
     if (failCount > 0) {
       message.warning(`合并完成：成功 ${successCount} 组，失败 ${failCount} 组`)
     } else {
@@ -258,16 +273,25 @@ function Home(): JSX.Element {
     <Layout style={{ minHeight: '100vh' }}>
       <Header
         style={{
-          background: '#fff',
+          background: darkMode ? '#141414' : '#fff',
           padding: '0 24px',
           display: 'flex',
-          alignItems: 'center'
+          alignItems: 'center',
+          borderBottom: darkMode ? '1px solid #303030' : '1px solid #f0f0f0'
         }}
       >
         <Title level={3} style={{ margin: 0 }}>
           <MergeCellsOutlined /> 视频自动合并工具
         </Title>
         <Tag color="green" style={{ marginLeft: 16 }}>FFmpeg 就绪</Tag>
+        <div style={{ flex: 1 }} />
+        <Button
+          icon={darkMode ? <BulbFilled /> : <BulbOutlined />}
+          onClick={() => onToggleDarkMode(!darkMode)}
+          title={darkMode ? '切换到浅色模式' : '切换到深色模式'}
+        >
+          {darkMode ? '深色' : '浅色'}
+        </Button>
       </Header>
 
       <Content style={{ padding: 24 }}>
