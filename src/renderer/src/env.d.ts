@@ -9,11 +9,11 @@ interface Window {
     loadConfig: () => Promise<AppConfig>
     saveConfig: (config: Record<string, unknown>) => Promise<void>
     // 文件夹
-selectFolder: () => Promise<string>
-selectOutputFolder: () => Promise<string>
-openDirectory: (path: string) => Promise<void>
+    selectFolder: () => Promise<string>
+    selectOutputFolder: () => Promise<string>
+    openDirectory: (path: string) => Promise<void>
     // 扫描
-scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => Promise<ScanResult>
+    scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => Promise<ScanResult>
     // 视频
     getVideoInfo: (filePath: string) => Promise<VideoInfo>
     mergeVideos: (filePaths: string[], outputPath: string) => Promise<string | undefined>

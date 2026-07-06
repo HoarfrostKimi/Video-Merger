@@ -3,13 +3,12 @@ import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography,
 import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, FileOutlined, ClearOutlined, FolderOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
+import { join } from 'path'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
 
-interface HomeProps {}
-
-function Home(_props: HomeProps): JSX.Element {
+function Home(): JSX.Element {
   const [inputFolder, setInputFolder] = useState('')
   const [outputFolder, setOutputFolder] = useState('')
   const [folders, setFolders] = useState<FolderGroup[]>([])
@@ -34,8 +33,8 @@ function Home(_props: HomeProps): JSX.Element {
         if (config.outputFolder) {
           setOutputFolder(config.outputFolder)
         }
-      } catch {
-        //
+      } catch (err) {
+        console.warn('加载配置失败:', err)
       }
     })()
   }, [])
@@ -111,10 +110,6 @@ function Home(_props: HomeProps): JSX.Element {
     return `${m}:${String(sec).padStart(2, '0')}`
   }
 
-  useEffect(() => {
-    // 进度通过轮询获取，无需注册监听器
-  }, [])
-
   const handleMerge = useCallback(async () => {
     if (!window.api) return
     if (selectedRowKeys.length === 0) {
@@ -140,7 +135,9 @@ function Home(_props: HomeProps): JSX.Element {
       try {
         const { mergeProgress } = await window.api!.getProgress()
         setProgress(mergeProgress)
-      } catch { /* 忽略轮询错误 */ }
+      } catch (err) {
+        console.warn('进度轮询失败:', err)
+      }
     }, 300)
 
     try {
@@ -151,7 +148,7 @@ function Home(_props: HomeProps): JSX.Element {
 
         setStatusText(`正在合并 (${i + 1}/${selectedRowKeys.length}): ${folder.folderName}`)
         const outputFileName = genMergeFileName(folder)
-        const outputPath = outputFolder.replace(/\\$/, '') + '\\' + outputFileName + '.mp4'
+        const outputPath = join(outputFolder, outputFileName + '.mp4')
         const filePaths = folder.files.map((f) => f.path)
 
         const warning = await window.api.mergeVideos(filePaths, outputPath)

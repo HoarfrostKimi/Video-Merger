@@ -57,6 +57,11 @@ function ffmpegProbe(filePath: string): Promise<{
   })
 }
 
+/**
+ * 获取视频文件的基本信息（时长、编码、分辨率等）
+ * @param filePath - 视频文件路径
+ * @returns 视频信息对象，包含 duration、codec、width、height
+ */
 export function getVideoInfo(filePath: string): Promise<{
   duration: number
   codec: string
@@ -71,6 +76,14 @@ export function getVideoInfo(filePath: string): Promise<{
   }))
 }
 
+/**
+ * 合并多个 FLV 视频文件为一个 MP4 文件
+ * 使用 stream copy 模式（不重新编码），速度极快
+ * @param filePaths - 要合并的视频文件路径数组
+ * @param outputPath - 输出文件路径
+ * @param onProgress - 进度回调函数，参数为 0-100 的百分比
+ * @returns 如果有文件被跳过，返回警告信息；否则返回 undefined
+ */
 export function mergeVideos(
   filePaths: string[],
   outputPath: string,
@@ -230,6 +243,13 @@ export function mergeVideos(
   })
 }
 
+/**
+ * 将视频文件转换为 MP4 格式（重新编码）
+ * 使用 H.264 视频编码 + AAC 音频编码
+ * @param filePath - 输入视频文件路径
+ * @param outputPath - 输出 MP4 文件路径
+ * @param onProgress - 进度回调函数，参数为 0-100 的百分比
+ */
 export function convertToMp4(
   filePath: string,
   outputPath: string,
