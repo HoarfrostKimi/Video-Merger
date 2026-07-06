@@ -5,9 +5,9 @@ import { writeFileSync, unlinkSync, existsSync, renameSync, mkdirSync, openSync,
 import { tmpdir } from 'os'
 import { spawn } from 'child_process'
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path)
-
-const FFMPEG_PATH = ffmpegInstaller.path
+// 打包后路径在 app.asar 内，spawn 无法从 asar 虚拟文件系统启动 exe，需重定向到 unpacked 目录
+const FFMPEG_PATH = ffmpegInstaller.path.replace('app.asar', 'app.asar.unpacked')
+ffmpeg.setFfmpegPath(FFMPEG_PATH)
 
 // 快速探测：只读取文件头信息，不处理整个文件（毫秒级完成）
 function ffmpegProbe(filePath: string): Promise<{

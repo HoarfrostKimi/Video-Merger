@@ -3,7 +3,6 @@ import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography,
 import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, FileOutlined, ClearOutlined, FolderOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
-import { join } from 'path'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -140,15 +139,18 @@ function Home(): JSX.Element {
       }
     }, 300)
 
-    try {
-      for (let i = 0; i < selectedRowKeys.length; i++) {
-        const key = selectedRowKeys[i] as string
-        const folder = folders.find((f) => f.key === key)
-        if (!folder) continue
+    let successCount = 0
+    let failCount = 0
 
+    for (let i = 0; i < selectedRowKeys.length; i++) {
+      const key = selectedRowKeys[i] as string
+      const folder = folders.find((f) => f.key === key)
+      if (!folder) continue
+
+      try {
         setStatusText(`正在合并 (${i + 1}/${selectedRowKeys.length}): ${folder.folderName}`)
         const outputFileName = genMergeFileName(folder)
-        const outputPath = join(outputFolder, outputFileName + '.mp4')
+        const outputPath = outputFolder.replace(/[\\/]$/, '') + '/' + outputFileName + '.mp4'
         const filePaths = folder.files.map((f) => f.path)
 
         const warning = await window.api.mergeVideos(filePaths, outputPath)
@@ -156,22 +158,26 @@ function Home(): JSX.Element {
           message.warning(warning)
         }
 
+        successCount++
         setFolders((prev) => prev.filter((f) => f.key !== key))
         setSelectedRowKeys((prev) => prev.filter((k) => k !== key))
+      } catch (err: any) {
+        failCount++
+        message.error(`合并 ${folder.folderName} 失败: ${err.message}`)
       }
-
-      setProgress(100)
-      setStatusText('')
-      message.success(`合并完成！共处理 ${selectedRowKeys.length} 组`)
-    } catch (err: any) {
-      message.error(err.message || '合并失败')
-      setProgress(0)
-      setStatusText('')
-    } finally {
-      clearInterval(pollInterval)
-      if (timerRef.current) clearInterval(timerRef.current)
-      setProcessing(false)
     }
+
+    setProgress(100)
+    setStatusText('')
+    if (failCount > 0) {
+      message.warning(`合并完成：成功 ${successCount} 组，失败 ${failCount} 组`)
+    } else {
+      message.success(`合并完成！共处理 ${successCount} 组`)
+    }
+
+    clearInterval(pollInterval)
+    if (timerRef.current) clearInterval(timerRef.current)
+    setProcessing(false)
   }, [selectedRowKeys, folders, outputFolder, genMergeFileName])
 
   const handleOpenDirectory = useCallback(async () => {
