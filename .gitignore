@@ -1,0 +1,24 @@
+# 依赖和构建产物
+node_modules/
+out/
+dist/
+
+# Electron 运行时缓存和用户数据
+electron-cache/
+user-data/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# 日志
+*.log
+npm-debug.log*
+
+# 环境变量
+.env
+.env.local
