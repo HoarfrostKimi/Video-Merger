@@ -19,8 +19,11 @@ interface Window {
     getVideoInfo: (filePath: string) => Promise<VideoInfo>
     mergeVideos: (filePaths: string[], outputPath: string) => Promise<string | undefined>
     convertVideo: (filePath: string, outputPath: string) => Promise<void>
+    // 批量并行合并
+    batchMergeVideos: (tasks: Array<{ taskId: string; filePaths: string[]; outputPath: string; folderName: string }>, concurrency?: number) => Promise<Array<{ taskId: string; folderName: string; success: boolean; warning?: string; error?: string }>>
     // 进度（轮询获取）
     getProgress: () => Promise<{ mergeProgress: number; convertProgress: number }>
+    getBatchProgress: () => Promise<Record<string, number>>
   }
 }
 
@@ -29,6 +32,8 @@ interface AppConfig {
   outputFolder?: string
   outputFileName?: string
   darkMode?: boolean
+  concurrency?: number
+  autoOpenWebsite?: boolean
 }
 
 interface FlvFile {

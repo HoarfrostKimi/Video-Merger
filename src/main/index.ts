@@ -10,6 +10,9 @@ let mainWindow: BrowserWindow | null = null
 let mergeProgress = 0
 let convertProgress = 0
 
+// 批量合并进度存储：Map<taskId, progress>
+const batchMergeProgress = new Map<string, number>()
+
 // ============ 配置管理：记住用户设置 ============
 
 interface AppConfig {
@@ -17,6 +20,8 @@ interface AppConfig {
   outputFolder?: string
   outputFileName?: string
   darkMode?: boolean
+  concurrency?: number
+  autoOpenWebsite?: boolean
 }
 
 function getConfigPath(): string {
@@ -342,6 +347,81 @@ ipcMain.handle('video:merge', async (event, filePaths: string[], outputPath: str
     mergeProgress = 0
     return { success: false, message: error.message }
   }
+})
+
+// 10. 批量并行合并视频
+interface BatchMergeTask {
+  taskId: string
+  filePaths: string[]
+  outputPath: string
+  folderName: string
+}
+
+interface BatchMergeResult {
+  taskId: string
+  folderName: string
+  success: boolean
+  warning?: string
+  error?: string
+}
+
+ipcMain.handle('video:batchMerge', async (_event, tasks: BatchMergeTask[], concurrency: number = 3) => {
+  // 初始化所有任务的进度为0
+  for (const task of tasks) {
+    batchMergeProgress.set(task.taskId, 0)
+  }
+
+  const results: BatchMergeResult[] = []
+  let currentIndex = 0
+
+  // 工作函数：从任务队列中取出任务执行
+  const worker = async (): Promise<void> => {
+    while (currentIndex < tasks.length) {
+      const taskIndex = currentIndex++
+      const task = tasks[taskIndex]
+
+      try {
+        const warning = await mergeVideos(task.filePaths, task.outputPath, (percent) => {
+          batchMergeProgress.set(task.taskId, percent)
+        })
+        batchMergeProgress.set(task.taskId, 100)
+        results.push({
+          taskId: task.taskId,
+          folderName: task.folderName,
+          success: true,
+          warning
+        })
+      } catch (error: any) {
+        batchMergeProgress.set(task.taskId, -1) // -1 表示失败
+        results.push({
+          taskId: task.taskId,
+          folderName: task.folderName,
+          success: false,
+          error: error.message
+        })
+      }
+    }
+  }
+
+  // 启动多个 worker 并行执行
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker())
+  await Promise.all(workers)
+
+  // 清理进度记录
+  for (const task of tasks) {
+    batchMergeProgress.delete(task.taskId)
+  }
+
+  return { success: true, data: results }
+})
+
+// 11. 获取批量合并进度
+ipcMain.handle('progress:getBatch', () => {
+  const progress: Record<string, number> = {}
+  batchMergeProgress.forEach((value, key) => {
+    progress[key] = value
+  })
+  return { success: true, data: progress }
 })
 
 // 6. 转换视频

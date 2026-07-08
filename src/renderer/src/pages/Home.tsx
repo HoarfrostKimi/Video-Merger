@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input } from 'antd'
+import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input, Switch } from 'antd'
 import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
@@ -23,8 +23,13 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [statusText, setStatusText] = useState('')
   const [selectedFolder, setSelectedFolder] = useState<FolderGroup | null>(null)
   const [maxIntervalHours, setMaxIntervalHours] = useState(2.5)
+  const [concurrency, setConcurrency] = useState(3)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [batchProgress, setBatchProgress] = useState<Record<string, number>>({})
+  const [autoOpenWebsite, setAutoOpenWebsite] = useState(true)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const websiteOpenedRef = useRef(false)
+  const folderOpenedRef = useRef(false)
 
   useEffect(() => {
     if (!window.api) return
@@ -36,6 +41,12 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         }
         if (config.outputFolder) {
           setOutputFolder(config.outputFolder)
+        }
+        if (config.concurrency !== undefined) {
+          setConcurrency(config.concurrency)
+        }
+        if (config.autoOpenWebsite !== undefined) {
+          setAutoOpenWebsite(config.autoOpenWebsite)
         }
       } catch (err) {
         console.warn('加载配置失败:', err)
@@ -128,73 +139,108 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     setProcessing(true)
     setProgress(0)
     setElapsedSeconds(0)
+    setBatchProgress({})
 
     // 启动计时器，每秒更新已用时间
     timerRef.current = setInterval(() => {
       setElapsedSeconds((prev) => prev + 1)
     }, 1000)
 
-    // 启动进度轮询，每 300ms 从主进程获取最新进度
+    // 准备批量合并任务
+    const tasks = selectedRowKeys.map((key) => {
+      const folder = folders.find((f) => f.key === key)
+      if (!folder) throw new Error(`找不到分组: ${key}`)
+
+      const outputFileName = genMergeFileName(folder)
+      const outputPath = outputFolder.replace(/[\\/]$/, '') + '/' + outputFileName + '.mp4'
+      const filePaths = folder.files.map((f) => f.path)
+
+      return {
+        taskId: folder.key,
+        filePaths,
+        outputPath,
+        folderName: folder.folderName
+      }
+    })
+
+    // 启动进度轮询，每 500ms 从主进程获取批量进度
     const pollInterval = setInterval(async () => {
       try {
-        const { mergeProgress } = await window.api!.getProgress()
-        setProgress(mergeProgress)
-      } catch (err) {
-        console.warn('进度轮询失败:', err)
-      }
-    }, 300)
+        const progress = await window.api!.getBatchProgress()
+        setBatchProgress(progress)
 
-    let successCount = 0
-    let failCount = 0
-
-    for (let i = 0; i < selectedRowKeys.length; i++) {
-      const key = selectedRowKeys[i] as string
-      const folder = folders.find((f) => f.key === key)
-      if (!folder) continue
-
-      try {
-        setStatusText(`正在合并 (${i + 1}/${selectedRowKeys.length}): ${folder.folderName}`)
-        const outputFileName = genMergeFileName(folder)
-        const outputPath = outputFolder.replace(/[\\/]$/, '') + '/' + outputFileName + '.mp4'
-        const filePaths = folder.files.map((f) => f.path)
-
-        const warning = await window.api.mergeVideos(filePaths, outputPath)
-        if (warning) {
-          message.warning(warning)
+        // 计算总体进度
+        const values = Object.values(progress)
+        if (values.length > 0) {
+          const totalProgress = values.reduce((sum, p) => sum + Math.max(0, p), 0) / values.length
+          setProgress(totalProgress)
         }
-
-        successCount++
-        setFolders((prev) => prev.filter((f) => f.key !== key))
-        setSelectedRowKeys((prev) => prev.filter((k) => k !== key))
-      } catch (err: any) {
-        failCount++
-        message.error(`合并 ${folder.folderName} 失败: ${err.message}`)
+      } catch (err) {
+        console.warn('批量进度轮询失败:', err)
       }
-    }
+    }, 500)
 
-    setProgress(100)
-    setStatusText('')
+    try {
+      setStatusText(`正在并行合并 ${tasks.length} 个分组（并发数: ${concurrency}）`)
 
-    // 合并完成后自动打开输出文件夹和B站投稿页面
-    if (successCount > 0 && window.api && outputFolder) {
-      try {
-        await window.api.openDirectory(outputFolder)
-        await window.api.openExternal('https://member.bilibili.com/platform/upload/video/frame')
-      } catch {
-        // ignore
+      // 调用批量合并API
+      const results = await window.api.batchMergeVideos(tasks, concurrency)
+
+      // 统计结果
+      let successCount = 0
+      let failCount = 0
+      const successKeys: string[] = []
+
+      for (const result of results) {
+        if (result.success) {
+          successCount++
+          successKeys.push(result.taskId)
+          if (result.warning) {
+            message.warning(result.warning)
+          }
+        } else {
+          failCount++
+          message.error(`合并 ${result.folderName} 失败: ${result.error}`)
+        }
       }
-    }
 
-    if (failCount > 0) {
-      message.warning(`合并完成：成功 ${successCount} 组，失败 ${failCount} 组`)
-    } else {
-      message.success(`合并完成！共处理 ${successCount} 组`)
-    }
+      // 移除成功的分组
+      setFolders((prev) => prev.filter((f) => !successKeys.includes(f.key)))
+      setSelectedRowKeys((prev) => prev.filter((k) => !successKeys.includes(k)))
 
-    clearInterval(pollInterval)
-    if (timerRef.current) clearInterval(timerRef.current)
-    setProcessing(false)
-  }, [selectedRowKeys, folders, outputFolder, genMergeFileName])
+      setProgress(100)
+      setStatusText('')
+
+      // 合并完成后自动打开输出文件夹和B站投稿页面（仅首次）
+      if (successCount > 0 && window.api && outputFolder) {
+        try {
+          if (!folderOpenedRef.current) {
+            await window.api.openDirectory(outputFolder)
+            folderOpenedRef.current = true
+          }
+          // 根据开关状态和是否已打开过来决定是否打开网站
+          if (autoOpenWebsite && !websiteOpenedRef.current) {
+            await window.api.openExternal('https://member.bilibili.com/platform/upload/video/frame')
+            websiteOpenedRef.current = true
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (failCount > 0) {
+        message.warning(`合并完成：成功 ${successCount} 组，失败 ${failCount} 组`)
+      } else {
+        message.success(`合并完成！共处理 ${successCount} 组`)
+      }
+    } catch (err: any) {
+      message.error(`批量合并失败: ${err.message}`)
+    } finally {
+      clearInterval(pollInterval)
+      if (timerRef.current) clearInterval(timerRef.current)
+      setProcessing(false)
+    }
+  }, [selectedRowKeys, folders, outputFolder, genMergeFileName, concurrency])
 
   const handleOpenDirectory = useCallback(async () => {
     if (!window.api) return
@@ -338,6 +384,36 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               />
               <Text type="secondary">小时（超过此间隔视为不同场直播）</Text>
             </Space>
+            <Space wrap>
+              <Text type="secondary">并行合并数:</Text>
+              <Input
+                type="number"
+                value={concurrency}
+                onChange={(e) => {
+                  const val = Number(e.target.value) || 3
+                  setConcurrency(val)
+                  if (window.api) window.api.saveConfig({ concurrency: val })
+                }}
+                style={{ width: 80 }}
+                min={1}
+                max={8}
+                step={1}
+              />
+              <Text type="secondary">个（同时合并的分组数量，建议2-4）</Text>
+            </Space>
+            <Space wrap>
+              <Text type="secondary">合并完成后自动打开B站投稿页面:</Text>
+              <Switch
+                checked={autoOpenWebsite}
+                onChange={(checked) => {
+                  setAutoOpenWebsite(checked)
+                  if (window.api) window.api.saveConfig({ autoOpenWebsite: checked })
+                }}
+                checkedChildren="开"
+                unCheckedChildren="关"
+              />
+              <Text type="secondary">（仅首次合并后打开，避免重复打开）</Text>
+            </Space>
           </Space>
         </Card>
 
@@ -425,6 +501,34 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               {processing && (
                 <div style={{ marginTop: 12 }}>
                   <Progress percent={parseFloat(progress.toFixed(1))} status="active" format={() => `${formatPercent(progress)}%`} />
+                  {/* 显示每个任务的进度 */}
+                  {Object.keys(batchProgress).length > 0 && (
+                    <div style={{ marginTop: 12 }}>
+                      {selectedRowKeys.map((key) => {
+                        const folder = folders.find((f) => f.key === key)
+                        if (!folder) return null
+                        const taskProgress = batchProgress[key]
+                        if (taskProgress === undefined) return null
+
+                        const status = taskProgress === 100 ? 'success' : taskProgress === -1 ? 'exception' : 'active'
+                        const percent = taskProgress === -1 ? 0 : taskProgress
+
+                        return (
+                          <div key={key} style={{ marginBottom: 8 }}>
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {folder.folderName}
+                            </Text>
+                            <Progress
+                              percent={parseFloat(percent.toFixed(1))}
+                              status={status}
+                              size="small"
+                              format={() => taskProgress === -1 ? '失败' : `${formatPercent(percent)}%`}
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </Card>

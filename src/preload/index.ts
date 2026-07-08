@@ -39,8 +39,13 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => invokeApi('scan
   convertVideo: (filePath: string, outputPath: string) =>
     invokeApi('video:convert', filePath, outputPath),
 
+  // 批量并行合并
+  batchMergeVideos: (tasks: Array<{ taskId: string; filePaths: string[]; outputPath: string; folderName: string }>, concurrency?: number) =>
+    invokeApi('video:batchMerge', tasks, concurrency),
+
   // 获取当前进度（轮询方式，更可靠）
   getProgress: () => invokeApi('progress:get'),
+  getBatchProgress: () => invokeApi('progress:getBatch'),
 }
 
 if (process.contextIsolated) {
