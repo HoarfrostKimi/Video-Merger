@@ -175,10 +175,11 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     setProgress(100)
     setStatusText('')
 
-    // 合并完成后自动打开输出文件夹
+    // 合并完成后自动打开输出文件夹和B站投稿页面
     if (successCount > 0 && window.api && outputFolder) {
       try {
         await window.api.openDirectory(outputFolder)
+        await window.api.openExternal('https://member.bilibili.com/platform/upload/video/frame')
       } catch {
         // ignore
       }

@@ -296,6 +296,16 @@ ipcMain.handle('dialog:openDirectory', async (_event, path: string) => {
   }
 })
 
+// 9. 打开外部链接
+ipcMain.handle('dialog:openExternal', async (_event, url: string) => {
+  try {
+    shell.openExternal(url)
+    return { success: true }
+  } catch (error: any) {
+    return { success: false, message: error.message || '打开链接失败' }
+  }
+})
+
 // 3. 选择输出目录
 ipcMain.handle('dialog:selectOutputFolder', async () => {
   const result = await dialog.showOpenDialog({

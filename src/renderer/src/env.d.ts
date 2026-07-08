@@ -12,6 +12,7 @@ interface Window {
     selectFolder: () => Promise<string>
     selectOutputFolder: () => Promise<string>
     openDirectory: (path: string) => Promise<void>
+    openExternal: (url: string) => Promise<void>
     // 扫描
     scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => Promise<ScanResult>
     // 视频

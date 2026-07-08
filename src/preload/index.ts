@@ -27,6 +27,7 @@ const api = {
   selectFolder: () => invokeApi('dialog:selectFolder'),
   selectOutputFolder: () => invokeApi('dialog:selectOutputFolder'),
   openDirectory: (path: string) => invokeApi('dialog:openDirectory', path),
+  openExternal: (url: string) => invokeApi('dialog:openExternal', url),
 
   // 文件扫描
 scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => invokeApi('scan:flvFiles', folderPath, maxIntervalHours),

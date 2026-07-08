@@ -1,7 +1,7 @@
 import ffmpeg from 'fluent-ffmpeg'
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
 import { join, dirname } from 'path'
-import { writeFileSync, unlinkSync, existsSync, renameSync, mkdirSync, openSync, closeSync, statSync } from 'fs'
+import { writeFileSync, unlinkSync, existsSync, renameSync, mkdirSync, openSync, closeSync, statSync, copyFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { spawn } from 'child_process'
 
@@ -222,7 +222,8 @@ export function mergeVideos(
             }
           }
         }
-        renameSync(tempOutput, outputPath)
+        copyFileSync(tempOutput, outputPath)
+        unlinkSync(tempOutput)
         const msg = lockedFiles.length > 0
           ? `合并完成！但跳过了${lockedFiles.length}个正在录制中的片段`
           : undefined
@@ -286,7 +287,8 @@ export function convertToMp4(
               renameSync(outputPath, outputPath.replace(/\.mp4$/i, '_backup.mp4'))
             }
           }
-          renameSync(tempOutput, outputPath)
+          copyFileSync(tempOutput, outputPath)
+          unlinkSync(tempOutput)
           resolve()
         } catch (err: any) {
           try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
