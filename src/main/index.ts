@@ -23,6 +23,7 @@ interface AppConfig {
   concurrency?: number
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
+  hiddenFolderKeys?: string[]
 }
 
 function getConfigPath(): string {
@@ -48,7 +49,9 @@ function saveConfig(config: AppConfig): void {
     const current = loadConfig()
     const merged = { ...current, ...config }
     writeFileSync(getConfigPath(), JSON.stringify(merged, null, 2), 'utf-8')
-  } catch { /* ignore */ }
+  } catch {
+    // ignore
+  }
 }
 
 // ============ 窗口创建 ============

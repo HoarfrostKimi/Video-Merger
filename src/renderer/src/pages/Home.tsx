@@ -16,6 +16,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [inputFolder, setInputFolder] = useState('')
   const [outputFolder, setOutputFolder] = useState('')
   const [folders, setFolders] = useState<FolderGroup[]>([])
+  const [hiddenFolderKeys, setHiddenFolderKeys] = useState<string[]>([])
   const [hiddenFolders, setHiddenFolders] = useState<FolderGroup[]>([])
   const [showHidden, setShowHidden] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
@@ -38,9 +39,13 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   useEffect(() => {
     if (!window.api) return
     ;(async () => {
+      // 第一步：加载配置
+      let loadedInputFolder = ''
+      let loadedHiddenKeys: string[] = []
       try {
         const config = await window.api.loadConfig()
         if (config.inputFolder) {
+          loadedInputFolder = config.inputFolder
           setInputFolder(config.inputFolder)
         }
         if (config.outputFolder) {
@@ -55,28 +60,35 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         if (config.autoOpenFolder !== undefined) {
           setAutoOpenFolder(config.autoOpenFolder)
         }
+        if (config.hiddenFolderKeys && Array.isArray(config.hiddenFolderKeys)) {
+          loadedHiddenKeys = config.hiddenFolderKeys
+          setHiddenFolderKeys(config.hiddenFolderKeys)
+        }
       } catch (err) {
         console.warn('加载配置失败:', err)
       }
-    })()
-  }, [])
 
-  // 启动时如果已有输入文件夹，自动扫描
-  useEffect(() => {
-    if (!inputFolder || !window.api) return
-    ;(async () => {
-      try {
-        setScanning(true)
-        const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours)
-        setFolders(result.folders)
-        const totalFiles = result.folders.reduce((s, g) => s + g.fileCount, 0)
-        if (totalFiles > 0) {
-          message.success(`自动扫描完成，找到 ${result.folders.length} 组待合并，共 ${totalFiles} 个片段`)
+      // 第二步：配置加载完成后，立即自动扫描（使用刚加载的排除列表）
+      if (loadedInputFolder) {
+        try {
+          setScanning(true)
+          const result: ScanResult = await window.api.scanFlvFiles(loadedInputFolder, 2.5)
+          const hiddenSet = new Set(loadedHiddenKeys)
+          const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
+          const hidden = result.folders.filter((f) => hiddenSet.has(f.key))
+          setFolders(filtered)
+          setHiddenFolders(hidden)
+          setSelectedRowKeys([])
+          setSelectedFolder(null)
+          const totalFiles = filtered.reduce((s, g) => s + g.fileCount, 0)
+          if (totalFiles > 0) {
+            message.success(`自动扫描完成，找到 ${filtered.length} 组待合并，共 ${totalFiles} 个片段`)
+          }
+        } catch {
+          // ignore
+        } finally {
+          setScanning(false)
         }
-      } catch {
-        // ignore
-      } finally {
-        setScanning(false)
       }
     })()
   }, [])
@@ -98,6 +110,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         setOutputFolder(folder)
       }
       setFolders([])
+      setHiddenFolderKeys([])
       setHiddenFolders([])
       setShowHidden(false)
       setSelectedRowKeys([])
@@ -126,10 +139,12 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     setScanning(true)
     try {
       const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours)
-      // 过滤掉已排除的分组（按标题+日期匹配）
-      const hiddenKeys = new Set(hiddenFolders.map((f) => f.key))
-      const filtered = result.folders.filter((f) => !hiddenKeys.has(f.key))
+      const hiddenSet = new Set(hiddenFolderKeys)
+      const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
+      // 保存被排除的完整对象用于显示
+      const hidden = result.folders.filter((f) => hiddenSet.has(f.key))
       setFolders(filtered)
+      setHiddenFolders(hidden)
       setSelectedRowKeys([])
       setSelectedFolder(null)
       const totalFiles = filtered.reduce((s, g) => s + g.fileCount, 0)
@@ -139,7 +154,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     } finally {
       setScanning(false)
     }
-  }, [inputFolder, hiddenFolders])
+  }, [inputFolder, hiddenFolderKeys])
 
   // 格式化百分比：小于 1% 时显示一位小数，否则显示整数
   const formatPercent = (p: number) => {
@@ -294,10 +309,13 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       return
     }
     const toHide = folders.filter((f) => selectedRowKeys.includes(f.key))
+    const newKeys = [...hiddenFolderKeys, ...toHide.map((f) => f.key)]
+    setHiddenFolderKeys(newKeys)
     setHiddenFolders((prev) => [...prev, ...toHide])
     setFolders((prev) => prev.filter((f) => !selectedRowKeys.includes(f.key)))
     setSelectedRowKeys([])
     setSelectedFolder(null)
+    if (window.api) window.api.saveConfig({ hiddenFolderKeys: newKeys })
     message.success(`已排除 ${toHide.length} 个分组`)
   }, [selectedRowKeys, folders])
 
@@ -305,16 +323,21 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const handleRestoreOne = useCallback((key: string) => {
     const folder = hiddenFolders.find((f) => f.key === key)
     if (!folder) return
+    const newKeys = hiddenFolderKeys.filter((k) => k !== key)
+    setHiddenFolderKeys(newKeys)
     setHiddenFolders((prev) => prev.filter((f) => f.key !== key))
     setFolders((prev) => [...prev, folder])
+    if (window.api) window.api.saveConfig({ hiddenFolderKeys: newKeys })
     message.success(`已恢复：${folder.folderName}`)
-  }, [hiddenFolders])
+  }, [hiddenFolders, hiddenFolderKeys])
 
   // 恢复所有隐藏分组
   const handleRestoreAll = useCallback(() => {
     setFolders((prev) => [...prev, ...hiddenFolders])
+    setHiddenFolderKeys([])
     setHiddenFolders([])
     setShowHidden(false)
+    if (window.api) window.api.saveConfig({ hiddenFolderKeys: [] })
     message.success(`已恢复全部 ${hiddenFolders.length} 个分组`)
   }, [hiddenFolders])
 

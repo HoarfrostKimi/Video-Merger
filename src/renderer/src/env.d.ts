@@ -35,6 +35,7 @@ interface AppConfig {
   concurrency?: number
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
+  hiddenFolderKeys?: string[]
 }
 
 interface FlvFile {
