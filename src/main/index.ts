@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
 import { join, relative, dirname } from 'path'
 import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -22,6 +22,7 @@ interface AppConfig {
   darkMode?: boolean
   concurrency?: number
   autoOpenWebsite?: boolean
+  autoOpenFolder?: boolean
 }
 
 function getConfigPath(): string {
@@ -109,7 +110,26 @@ ipcMain.handle('dialog:selectFolder', async () => {
   return { success: true, data: folder }
 })
 
-// 2. 扫描文件夹中的 FLV 文件（按日期+标题分组判断是否为同一场直播）
+// 支持的视频格式
+const VIDEO_EXTENSIONS = ['.flv', '.m4s', '.ts', '.blv']
+
+function isVideoFile(fileName: string): boolean {
+  const lower = fileName.toLowerCase()
+  return VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext))
+}
+
+function stripVideoExtension(fileName: string): string {
+  let name = fileName
+  for (const ext of VIDEO_EXTENSIONS) {
+    if (name.toLowerCase().endsWith(ext)) {
+      name = name.slice(0, -ext.length)
+      break
+    }
+  }
+  return name
+}
+
+// 2. 扫描文件夹中的视频文件（按日期+标题分组判断是否为同一场直播）
 ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHours: number = 2.5) => {
   try {
     interface FlvFile {
@@ -128,8 +148,8 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
 
     const files: FileInfo[] = []
 
-    function parseFileName(fileName: string): { date: string; time: string; title: string } {
-      const nameWithoutExt = fileName.replace(/\.flv$/i, '')
+    const parseFileName = (fileName: string): { date: string; time: string; title: string } => {
+      const nameWithoutExt = stripVideoExtension(fileName)
       const match = nameWithoutExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
       if (match) {
         return {
@@ -145,7 +165,7 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
       }
     }
 
-    function scanDir(dir: string): void {
+    const scanDir = (dir: string): void => {
       const entries = readdirSync(dir)
       for (const entry of entries) {
         if (entry.startsWith('.')) continue
@@ -154,7 +174,7 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
           const s = statSync(fullPath)
           if (s.isDirectory()) {
             scanDir(fullPath)
-          } else if (entry.toLowerCase().endsWith('.flv')) {
+          } else if (isVideoFile(entry)) {
             const { date, time, title } = parseFileName(entry)
             const timeParts = time.split('-')
             const timestamp = timeParts.length >= 4
@@ -191,6 +211,7 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
       files: FlvFile[]
       date: string
       title: string
+      lastTimestamp: number
     }> = []
 
     if (files.length > 0) {
@@ -225,22 +246,41 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
           const interval = file.timestamp - currentGroup.lastTimestamp
 
           if (file.title === currentGroup.title && interval <= MAX_INTERVAL_MS) {
+            // 和当前分组标题相同且间隔在阈值内，直接加入
             currentGroup.fileCount++
             currentGroup.totalSize += file.size
             currentGroup.files.push(file)
             currentGroup.lastTimestamp = file.timestamp
           } else {
-            groups.push(currentGroup)
-            currentGroup = {
-              key: `${file.date}_${file.title}`,
-              folderName: `${file.date} ${file.title}`,
-              folderPath: dirname(file.path),
-              fileCount: 1,
-              totalSize: file.size,
-              files: [file],
-              date: file.date,
-              title: file.title,
-              lastTimestamp: file.timestamp
+            // 标题不同或间隔太大，先搜索所有已有分组看能否合并
+            let matched = false
+            for (const group of groups) {
+              if (group.title === file.title && group.date === file.date) {
+                const gap = file.timestamp - group.lastTimestamp
+                if (gap <= MAX_INTERVAL_MS) {
+                  group.fileCount++
+                  group.totalSize += file.size
+                  group.files.push(file)
+                  group.lastTimestamp = file.timestamp
+                  matched = true
+                  break
+                }
+              }
+            }
+            if (!matched) {
+              // 没有匹配的已有分组，先保存当前分组，再创建新分组
+              groups.push(currentGroup)
+              currentGroup = {
+                key: `${file.date}_${file.title}`,
+                folderName: `${file.date} ${file.title}`,
+                folderPath: dirname(file.path),
+                fileCount: 1,
+                totalSize: file.size,
+                files: [file],
+                date: file.date,
+                title: file.title,
+                lastTimestamp: file.timestamp
+              }
             }
           }
         }
@@ -253,7 +293,7 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
 
     groups.sort((a, b) => b.fileCount - a.fileCount || b.date.localeCompare(a.date))
 
-    function hasMergedVideo(dir: string, date: string, title: string): boolean {
+    const hasMergedVideo = (dir: string, date: string, title: string): boolean => {
       try {
         const entries = readdirSync(dir)
         for (const entry of entries) {
@@ -449,6 +489,9 @@ app.setPath('userData', join(__dirname, '../../user-data'))
 
 // 应用启动
 app.whenReady().then(() => {
+  // 去掉默认菜单栏
+  Menu.setApplicationMenu(null)
+
   electronApp.setAppUserModelId('com.videomerger.app')
   
   app.on('browser-window-created', (_, window) => {

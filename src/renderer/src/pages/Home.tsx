@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input, Switch } from 'antd'
-import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled } from '@ant-design/icons'
+import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input, Switch, Drawer } from 'antd'
+import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled, EyeInvisibleOutlined, EyeOutlined, UndoOutlined, SettingOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 
@@ -16,6 +16,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [inputFolder, setInputFolder] = useState('')
   const [outputFolder, setOutputFolder] = useState('')
   const [folders, setFolders] = useState<FolderGroup[]>([])
+  const [hiddenFolders, setHiddenFolders] = useState<FolderGroup[]>([])
+  const [showHidden, setShowHidden] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [scanning, setScanning] = useState(false)
   const [processing, setProcessing] = useState(false)
@@ -27,6 +29,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [batchProgress, setBatchProgress] = useState<Record<string, number>>({})
   const [autoOpenWebsite, setAutoOpenWebsite] = useState(true)
+  const [autoOpenFolder, setAutoOpenFolder] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const websiteOpenedRef = useRef(false)
   const folderOpenedRef = useRef(false)
@@ -48,8 +52,31 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         if (config.autoOpenWebsite !== undefined) {
           setAutoOpenWebsite(config.autoOpenWebsite)
         }
+        if (config.autoOpenFolder !== undefined) {
+          setAutoOpenFolder(config.autoOpenFolder)
+        }
       } catch (err) {
         console.warn('加载配置失败:', err)
+      }
+    })()
+  }, [])
+
+  // 启动时如果已有输入文件夹，自动扫描
+  useEffect(() => {
+    if (!inputFolder || !window.api) return
+    ;(async () => {
+      try {
+        setScanning(true)
+        const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours)
+        setFolders(result.folders)
+        const totalFiles = result.folders.reduce((s, g) => s + g.fileCount, 0)
+        if (totalFiles > 0) {
+          message.success(`自动扫描完成，找到 ${result.folders.length} 组待合并，共 ${totalFiles} 个片段`)
+        }
+      } catch {
+        // ignore
+      } finally {
+        setScanning(false)
       }
     })()
   }, [])
@@ -71,6 +98,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         setOutputFolder(folder)
       }
       setFolders([])
+      setHiddenFolders([])
+      setShowHidden(false)
       setSelectedRowKeys([])
       setSelectedFolder(null)
     } catch (err: any) {
@@ -97,17 +126,20 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     setScanning(true)
     try {
       const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours)
-      setFolders(result.folders)
+      // 过滤掉已排除的分组（按标题+日期匹配）
+      const hiddenKeys = new Set(hiddenFolders.map((f) => f.key))
+      const filtered = result.folders.filter((f) => !hiddenKeys.has(f.key))
+      setFolders(filtered)
       setSelectedRowKeys([])
       setSelectedFolder(null)
-      const totalFiles = result.folders.reduce((s, g) => s + g.fileCount, 0)
-      message.success(`扫描完成，找到 ${result.folders.length} 组待合并，共 ${totalFiles} 个片段`)
+      const totalFiles = filtered.reduce((s, g) => s + g.fileCount, 0)
+      message.success(`扫描完成，找到 ${filtered.length} 组待合并，共 ${totalFiles} 个片段`)
     } catch (err: any) {
       message.error(err.message || '扫描失败')
     } finally {
       setScanning(false)
     }
-  }, [inputFolder])
+  }, [inputFolder, hiddenFolders])
 
   // 格式化百分比：小于 1% 时显示一位小数，否则显示整数
   const formatPercent = (p: number) => {
@@ -214,7 +246,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       // 合并完成后自动打开输出文件夹和B站投稿页面（仅首次）
       if (successCount > 0 && window.api && outputFolder) {
         try {
-          if (!folderOpenedRef.current) {
+          if (autoOpenFolder && !folderOpenedRef.current) {
             await window.api.openDirectory(outputFolder)
             folderOpenedRef.current = true
           }
@@ -254,6 +286,37 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       message.error(err.message || '打开目录失败')
     }
   }, [inputFolder])
+
+  // 排除选中的分组（移到隐藏列表）
+  const handleHideSelected = useCallback(() => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要排除的分组')
+      return
+    }
+    const toHide = folders.filter((f) => selectedRowKeys.includes(f.key))
+    setHiddenFolders((prev) => [...prev, ...toHide])
+    setFolders((prev) => prev.filter((f) => !selectedRowKeys.includes(f.key)))
+    setSelectedRowKeys([])
+    setSelectedFolder(null)
+    message.success(`已排除 ${toHide.length} 个分组`)
+  }, [selectedRowKeys, folders])
+
+  // 恢复单个隐藏分组
+  const handleRestoreOne = useCallback((key: string) => {
+    const folder = hiddenFolders.find((f) => f.key === key)
+    if (!folder) return
+    setHiddenFolders((prev) => prev.filter((f) => f.key !== key))
+    setFolders((prev) => [...prev, folder])
+    message.success(`已恢复：${folder.folderName}`)
+  }, [hiddenFolders])
+
+  // 恢复所有隐藏分组
+  const handleRestoreAll = useCallback(() => {
+    setFolders((prev) => [...prev, ...hiddenFolders])
+    setHiddenFolders([])
+    setShowHidden(false)
+    message.success(`已恢复全部 ${hiddenFolders.length} 个分组`)
+  }, [hiddenFolders])
 
   const formatSize = (bytes: number): string => {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -333,6 +396,11 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         <Tag color="green" style={{ marginLeft: 16 }}>FFmpeg 就绪</Tag>
         <div style={{ flex: 1 }} />
         <Button
+          icon={<SettingOutlined />}
+          onClick={() => setShowSettings(true)}
+          title="设置"
+        />
+        <Button
           icon={darkMode ? <BulbFilled /> : <BulbOutlined />}
           onClick={() => onToggleDarkMode(!darkMode)}
           title={darkMode ? '切换到浅色模式' : '切换到深色模式'}
@@ -344,7 +412,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       <Content style={{ padding: 24 }}>
         <Card size="small" style={{ marginBottom: 16 }}>
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Text strong>输入目录（扫描FLV文件）</Text>
+            <Text strong>输入目录（扫描视频文件）</Text>
             <Space wrap>
               <Input
                 value={inputFolder}
@@ -371,49 +439,6 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                 浏览...
               </Button>
             </Space>
-            <Space wrap>
-              <Text type="secondary">同场直播判定间隔:</Text>
-              <Input
-                type="number"
-                value={maxIntervalHours}
-                onChange={(e) => setMaxIntervalHours(Number(e.target.value) || 2.5)}
-                style={{ width: 80 }}
-                min={0.5}
-                max={12}
-                step={0.5}
-              />
-              <Text type="secondary">小时（超过此间隔视为不同场直播）</Text>
-            </Space>
-            <Space wrap>
-              <Text type="secondary">并行合并数:</Text>
-              <Input
-                type="number"
-                value={concurrency}
-                onChange={(e) => {
-                  const val = Number(e.target.value) || 3
-                  setConcurrency(val)
-                  if (window.api) window.api.saveConfig({ concurrency: val })
-                }}
-                style={{ width: 80 }}
-                min={1}
-                max={8}
-                step={1}
-              />
-              <Text type="secondary">个（同时合并的分组数量，建议2-4）</Text>
-            </Space>
-            <Space wrap>
-              <Text type="secondary">合并完成后自动打开B站投稿页面:</Text>
-              <Switch
-                checked={autoOpenWebsite}
-                onChange={(checked) => {
-                  setAutoOpenWebsite(checked)
-                  if (window.api) window.api.saveConfig({ autoOpenWebsite: checked })
-                }}
-                checkedChildren="开"
-                unCheckedChildren="关"
-              />
-              <Text type="secondary">（仅首次合并后打开，避免重复打开）</Text>
-            </Space>
           </Space>
         </Card>
 
@@ -436,6 +461,14 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                   <Button size="small" onClick={() => setSelectedRowKeys([])} icon={<ClearOutlined />}>
                     取消全选
                   </Button>
+                  <Button size="small" danger icon={<EyeInvisibleOutlined />} onClick={handleHideSelected}>
+                    排除选中
+                  </Button>
+                  {hiddenFolders.length > 0 && (
+                    <Button size="small" icon={<EyeOutlined />} onClick={() => setShowHidden(!showHidden)}>
+                      查看已排除 ({hiddenFolders.length})
+                    </Button>
+                  )}
                 </Space>
               }
             >
@@ -478,6 +511,53 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                 <Text type="secondary">请选择一个文件夹查看子文件列表</Text>
               )}
             </Card>
+
+            {/* 已排除分组面板 */}
+            {showHidden && hiddenFolders.length > 0 && (
+              <Card
+                size="small"
+                style={{ marginBottom: 16, border: '1px dashed #d9d9d9' }}
+                title={
+                  <Space>
+                    <Text strong>已排除的分组</Text>
+                    <Tag color="orange">{hiddenFolders.length} 个</Tag>
+                  </Space>
+                }
+                extra={
+                  <Button size="small" icon={<UndoOutlined />} onClick={handleRestoreAll}>
+                    全部恢复
+                  </Button>
+                }
+              >
+                <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                  {hiddenFolders.map((folder) => (
+                    <div
+                      key={folder.key}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '8px 12px',
+                        borderBottom: '1px solid #f0f0f0'
+                      }}
+                    >
+                      <Space>
+                        <Tag color="orange">{folder.date}</Tag>
+                        <Text>{folder.folderName}</Text>
+                        <Text type="secondary">({folder.fileCount}个片段, {formatSize(folder.totalSize)})</Text>
+                      </Space>
+                      <Button
+                        size="small"
+                        icon={<UndoOutlined />}
+                        onClick={() => handleRestoreOne(folder.key)}
+                      >
+                        恢复
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
 
             <Card size="small">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -544,6 +624,82 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           </Card>
         )}
       </Content>
+
+      {/* 设置面板 */}
+      <Drawer
+        title="设置"
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        width={420}
+      >
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          {/* 第一排：两个数字输入 */}
+          <Space wrap style={{ width: '100%' }}>
+            <Space direction="vertical" size={2}>
+              <Space>
+                <Text>同场直播判定间隔:</Text>
+                <Input
+                  type="number"
+                  value={maxIntervalHours}
+                  onChange={(e) => setMaxIntervalHours(Number(e.target.value) || 2.5)}
+                  style={{ width: 80 }}
+                  min={0.5}
+                  max={12}
+                  step={0.5}
+                />
+                <Text>小时</Text>
+              </Space>
+              <Text type="secondary">（超过此间隔视为不同场直播）</Text>
+            </Space>
+            <Space direction="vertical" size={2}>
+              <Space>
+                <Text>并行合并数:</Text>
+                <Input
+                  type="number"
+                  value={concurrency}
+                  onChange={(e) => {
+                    const val = Number(e.target.value) || 3
+                    setConcurrency(val)
+                    if (window.api) window.api.saveConfig({ concurrency: val })
+                  }}
+                  style={{ width: 80 }}
+                  min={1}
+                  max={8}
+                  step={1}
+                />
+                <Text>个</Text>
+              </Space>
+              <Text type="secondary">（同时合并的分组数量，建议2-4）</Text>
+            </Space>
+          </Space>
+          <Space wrap style={{ width: '100%' }}>
+            <Text>合并完成后自动打开输出文件夹:</Text>
+            <Switch
+              checked={autoOpenFolder}
+              onChange={(checked) => {
+                setAutoOpenFolder(checked)
+                if (window.api) window.api.saveConfig({ autoOpenFolder: checked })
+              }}
+              checkedChildren="开"
+              unCheckedChildren="关"
+            />
+            <Text type="secondary">（仅首次合并后打开）</Text>
+          </Space>
+          <Space wrap style={{ width: '100%' }}>
+            <Text>合并完成后自动打开B站投稿页面:</Text>
+            <Switch
+              checked={autoOpenWebsite}
+              onChange={(checked) => {
+                setAutoOpenWebsite(checked)
+                if (window.api) window.api.saveConfig({ autoOpenWebsite: checked })
+              }}
+              checkedChildren="开"
+              unCheckedChildren="关"
+            />
+            <Text type="secondary">（仅首次合并后打开）</Text>
+          </Space>
+        </Space>
+      </Drawer>
     </Layout>
   )
 }

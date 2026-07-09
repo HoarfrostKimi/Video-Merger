@@ -34,6 +34,7 @@ interface AppConfig {
   darkMode?: boolean
   concurrency?: number
   autoOpenWebsite?: boolean
+  autoOpenFolder?: boolean
 }
 
 interface FlvFile {
