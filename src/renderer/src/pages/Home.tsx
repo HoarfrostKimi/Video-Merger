@@ -32,6 +32,11 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [autoOpenWebsite, setAutoOpenWebsite] = useState(true)
   const [autoOpenFolder, setAutoOpenFolder] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
+  // 设置面板的临时值（未保存时不影响实际值）
+  const [draftMaxInterval, setDraftMaxInterval] = useState(2.5)
+  const [draftConcurrency, setDraftConcurrency] = useState(3)
+  const [draftAutoOpenFolder, setDraftAutoOpenFolder] = useState(true)
+  const [draftAutoOpenWebsite, setDraftAutoOpenWebsite] = useState(true)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const websiteOpenedRef = useRef(false)
   const folderOpenedRef = useRef(false)
@@ -50,6 +55,9 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         }
         if (config.outputFolder) {
           setOutputFolder(config.outputFolder)
+        }
+        if (config.maxIntervalHours !== undefined) {
+          setMaxIntervalHours(config.maxIntervalHours)
         }
         if (config.concurrency !== undefined) {
           setConcurrency(config.concurrency)
@@ -420,7 +428,14 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         <div style={{ flex: 1 }} />
         <Button
           icon={<SettingOutlined />}
-          onClick={() => setShowSettings(true)}
+          onClick={() => {
+            // 打开设置面板时，用当前值初始化临时值
+            setDraftMaxInterval(maxIntervalHours)
+            setDraftConcurrency(concurrency)
+            setDraftAutoOpenFolder(autoOpenFolder)
+            setDraftAutoOpenWebsite(autoOpenWebsite)
+            setShowSettings(true)
+          }}
           title="设置"
         />
         <Button
@@ -654,6 +669,31 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         open={showSettings}
         onClose={() => setShowSettings(false)}
         width={420}
+        footer={
+          <div style={{ textAlign: 'right' }}>
+            <Button
+              type="primary"
+              onClick={() => {
+                setMaxIntervalHours(draftMaxInterval)
+                setConcurrency(draftConcurrency)
+                setAutoOpenFolder(draftAutoOpenFolder)
+                setAutoOpenWebsite(draftAutoOpenWebsite)
+                if (window.api) {
+                  window.api.saveConfig({
+                    maxIntervalHours: draftMaxInterval,
+                    concurrency: draftConcurrency,
+                    autoOpenFolder: draftAutoOpenFolder,
+                    autoOpenWebsite: draftAutoOpenWebsite
+                  })
+                }
+                setShowSettings(false)
+                message.success('设置已保存')
+              }}
+            >
+              保存
+            </Button>
+          </div>
+        }
       >
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
           {/* 第一排：两个数字输入 */}
@@ -663,8 +703,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                 <Text>同场直播判定间隔:</Text>
                 <Input
                   type="number"
-                  value={maxIntervalHours}
-                  onChange={(e) => setMaxIntervalHours(Number(e.target.value) || 2.5)}
+                  value={draftMaxInterval}
+                  onChange={(e) => setDraftMaxInterval(Number(e.target.value) || 2.5)}
                   style={{ width: 80 }}
                   min={0.5}
                   max={12}
@@ -679,12 +719,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                 <Text>并行合并数:</Text>
                 <Input
                   type="number"
-                  value={concurrency}
-                  onChange={(e) => {
-                    const val = Number(e.target.value) || 3
-                    setConcurrency(val)
-                    if (window.api) window.api.saveConfig({ concurrency: val })
-                  }}
+                  value={draftConcurrency}
+                  onChange={(e) => setDraftConcurrency(Number(e.target.value) || 3)}
                   style={{ width: 80 }}
                   min={1}
                   max={8}
@@ -698,11 +734,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           <Space wrap style={{ width: '100%' }}>
             <Text>合并完成后自动打开输出文件夹:</Text>
             <Switch
-              checked={autoOpenFolder}
-              onChange={(checked) => {
-                setAutoOpenFolder(checked)
-                if (window.api) window.api.saveConfig({ autoOpenFolder: checked })
-              }}
+              checked={draftAutoOpenFolder}
+              onChange={(checked) => setDraftAutoOpenFolder(checked)}
               checkedChildren="开"
               unCheckedChildren="关"
             />
@@ -711,11 +744,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           <Space wrap style={{ width: '100%' }}>
             <Text>合并完成后自动打开B站投稿页面:</Text>
             <Switch
-              checked={autoOpenWebsite}
-              onChange={(checked) => {
-                setAutoOpenWebsite(checked)
-                if (window.api) window.api.saveConfig({ autoOpenWebsite: checked })
-              }}
+              checked={draftAutoOpenWebsite}
+              onChange={(checked) => setDraftAutoOpenWebsite(checked)}
               checkedChildren="开"
               unCheckedChildren="关"
             />

@@ -21,6 +21,7 @@ interface AppConfig {
   outputFileName?: string
   darkMode?: boolean
   concurrency?: number
+  maxIntervalHours?: number
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
   hiddenFolderKeys?: string[]
@@ -37,10 +38,16 @@ function getConfigPath(): string {
 function loadConfig(): AppConfig {
   try {
     const path = getConfigPath()
+    console.log('[loadConfig] 路径:', path)
     if (existsSync(path)) {
-      return JSON.parse(readFileSync(path, 'utf-8'))
+      const data = JSON.parse(readFileSync(path, 'utf-8'))
+      console.log('[loadConfig] 读取到:', JSON.stringify(data))
+      return data
     }
-  } catch { /* ignore */ }
+    console.log('[loadConfig] 文件不存在')
+  } catch (e) {
+    console.error('[loadConfig] 失败:', e)
+  }
   return {}
 }
 
@@ -48,9 +55,12 @@ function saveConfig(config: AppConfig): void {
   try {
     const current = loadConfig()
     const merged = { ...current, ...config }
-    writeFileSync(getConfigPath(), JSON.stringify(merged, null, 2), 'utf-8')
-  } catch {
-    // ignore
+    const path = getConfigPath()
+    console.log('[saveConfig] 写入:', JSON.stringify(merged))
+    writeFileSync(path, JSON.stringify(merged, null, 2), 'utf-8')
+    console.log('[saveConfig] 写入成功')
+  } catch (e) {
+    console.error('[saveConfig] 写入失败:', e)
   }
 }
 
@@ -487,8 +497,10 @@ ipcMain.handle('progress:get', () => {
   return { mergeProgress, convertProgress }
 })
 
-// 设置用户数据目录到项目内（解决沙箱限制）
-app.setPath('userData', join(__dirname, '../../user-data'))
+// 设置用户数据目录（开发模式用项目内目录，打包后用系统默认目录）
+if (is.dev) {
+  app.setPath('userData', join(__dirname, '../../user-data'))
+}
 
 // 应用启动
 app.whenReady().then(() => {

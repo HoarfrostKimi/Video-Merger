@@ -33,6 +33,7 @@ interface AppConfig {
   outputFileName?: string
   darkMode?: boolean
   concurrency?: number
+  maxIntervalHours?: number
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
   hiddenFolderKeys?: string[]
