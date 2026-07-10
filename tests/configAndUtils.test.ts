@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 /**
  * 测试配置管理逻辑
@@ -105,5 +105,92 @@ describe('文件路径转义逻辑', () => {
 
   it('路径包含空格 - 无需额外转义（已在引号内）', () => {
     expect(escapeFilePath('D:/my videos/test.flv')).toBe("file 'D:/my videos/test.flv'")
+  })
+})
+
+describe('配置文件原子写入', () => {
+  /**
+   * 对应 src/main/index.ts 中 saveConfig 的原子写入逻辑
+   * 先写 .tmp 临时文件，再 rename 到目标路径，防止写入中断导致配置损坏
+   */
+  function atomicSave(
+    configPath: string,
+    data: string,
+    fs: {
+      writeFileSync: (path: string, content: string) => void
+      renameSync: (src: string, dest: string) => void
+    }
+  ): { tmpPath: string; written: boolean; renamed: boolean } {
+    const tmpPath = configPath + '.tmp'
+    fs.writeFileSync(tmpPath, data)
+    fs.renameSync(tmpPath, configPath)
+    return { tmpPath, written: true, renamed: true }
+  }
+
+  it('应先写入 .tmp 文件再 rename 到目标路径', () => {
+    const writeFileSync = vi.fn()
+    const renameSync = vi.fn()
+    const fs = { writeFileSync, renameSync }
+
+    atomicSave('/config/config.json', '{"inputFolder":"/videos"}', fs)
+
+    // 验证先写 .tmp 文件
+    expect(writeFileSync).toHaveBeenCalledWith(
+      '/config/config.json.tmp',
+      '{"inputFolder":"/videos"}'
+    )
+    // 验证再 rename
+    expect(renameSync).toHaveBeenCalledWith(
+      '/config/config.json.tmp',
+      '/config/config.json'
+    )
+    // 验证调用顺序：先 writeFileSync 后 renameSync
+    expect(writeFileSync).toHaveBeenCalledBefore(renameSync)
+  })
+
+  it('.tmp 文件路径应为原路径加 .tmp 后缀', () => {
+    const result = atomicSave('/data/config.json', '{}', {
+      writeFileSync: vi.fn(),
+      renameSync: vi.fn()
+    })
+    expect(result.tmpPath).toBe('/data/config.json.tmp')
+  })
+})
+
+describe('启动时清理残留 .tmp 文件', () => {
+  /**
+   * 对应 src/main/index.ts 中 startConfigWatcher 启动时清理残留 .tmp 的逻辑
+   */
+  function cleanupTmpFile(
+    configPath: string,
+    fs: {
+      existsSync: (path: string) => boolean
+      unlinkSync: (path: string) => void
+    }
+  ): { cleaned: boolean; tmpPath: string } {
+    const tmpPath = configPath + '.tmp'
+    if (fs.existsSync(tmpPath)) {
+      fs.unlinkSync(tmpPath)
+      return { cleaned: true, tmpPath }
+    }
+    return { cleaned: false, tmpPath }
+  }
+
+  it('存在残留 .tmp 文件时应删除', () => {
+    const existsSync = vi.fn(() => true)
+    const unlinkSync = vi.fn()
+    const result = cleanupTmpFile('/config/config.json', { existsSync, unlinkSync })
+
+    expect(result.cleaned).toBe(true)
+    expect(unlinkSync).toHaveBeenCalledWith('/config/config.json.tmp')
+  })
+
+  it('不存在残留 .tmp 文件时不应操作', () => {
+    const existsSync = vi.fn(() => false)
+    const unlinkSync = vi.fn()
+    const result = cleanupTmpFile('/config/config.json', { existsSync, unlinkSync })
+
+    expect(result.cleaned).toBe(false)
+    expect(unlinkSync).not.toHaveBeenCalled()
   })
 })

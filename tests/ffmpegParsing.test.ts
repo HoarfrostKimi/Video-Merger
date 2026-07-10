@@ -145,3 +145,92 @@ describe('FFmpeg 视频流信息解析', () => {
     expect(info.height).toBe(480)
   })
 })
+
+describe('FFmpeg 错误消息友好化', () => {
+  /**
+   * 对应 src/main/ffmpeg.ts 中的 formatFfmpegError 函数
+   * 将 FFmpeg 原始错误信息映射为用户友好的中文提示
+   */
+  function formatFfmpegError(stderr: string, exitCode: number): string {
+    const last3Lines = stderr.split('\n').slice(-3).join('\n')
+
+    if (/Permission denied|EACCES/i.test(stderr)) {
+      return '没有权限写入输出目录，请检查输出路径设置'
+    }
+    if (/No such file or directory|ENOENT/i.test(stderr)) {
+      return '源文件未找到，请检查文件是否存在'
+    }
+    if (/Invalid argument|Invalid data found/i.test(stderr)) {
+      return '视频文件格式不兼容或文件损坏'
+    }
+    if (/Cannot allocate memory/i.test(stderr)) {
+      return '系统内存不足，请关闭一些程序后重试'
+    }
+    if (exitCode === 137 || /SIGKILL/i.test(stderr)) {
+      return '合并被系统终止（可能内存不足）'
+    }
+    return `合并失败，源文件可能存在问题。详情：${last3Lines}`
+  }
+
+  it('Permission denied - 应返回包含"权限"的提示', () => {
+    const msg = formatFfmpegError('Output file: Permission denied', 1)
+    expect(msg).toContain('权限')
+  })
+
+  it('EACCES - 应返回包含"权限"的提示', () => {
+    const msg = formatFfmpegError('EACCES: permission denied', 1)
+    expect(msg).toContain('权限')
+  })
+
+  it('No such file or directory - 应返回包含"未找到"的提示', () => {
+    const msg = formatFfmpegError('No such file or directory', 1)
+    expect(msg).toContain('未找到')
+  })
+
+  it('ENOENT - 应返回包含"未找到"的提示', () => {
+    const msg = formatFfmpegError('ENOENT: no such file', 1)
+    expect(msg).toContain('未找到')
+  })
+
+  it('Invalid data found - 应返回包含"格式不兼容"的提示', () => {
+    const msg = formatFfmpegError('Invalid data found when processing input', 1)
+    expect(msg).toContain('格式不兼容')
+  })
+
+  it('Invalid argument - 应返回包含"格式不兼容"的提示', () => {
+    const msg = formatFfmpegError('Invalid argument in stream spec', 1)
+    expect(msg).toContain('格式不兼容')
+  })
+
+  it('Cannot allocate memory - 应返回包含"内存不足"的提示', () => {
+    const msg = formatFfmpegError('Cannot allocate memory for buffer', 1)
+    expect(msg).toContain('内存不足')
+  })
+
+  it('exitCode 137 (SIGKILL) - 应返回系统终止提示', () => {
+    const msg = formatFfmpegError('Some output', 137)
+    expect(msg).toContain('系统终止')
+  })
+
+  it('SIGKILL 关键字 - 应返回系统终止提示', () => {
+    const msg = formatFfmpegError('Process received SIGKILL', 1)
+    expect(msg).toContain('系统终止')
+  })
+
+  it('未知错误 - 应包含 stderr 最后几行', () => {
+    const stderr = 'line1\nline2\nline3\nline4\nline5'
+    const msg = formatFfmpegError(stderr, 1)
+    expect(msg).toContain('line3')
+    expect(msg).toContain('line4')
+    expect(msg).toContain('line5')
+    expect(msg).not.toContain('line1')
+    expect(msg).not.toContain('line2')
+  })
+
+  it('未知错误 - 短 stderr 应全部包含', () => {
+    const stderr = 'only error line'
+    const msg = formatFfmpegError(stderr, 1)
+    expect(msg).toContain('only error line')
+    expect(msg).toContain('详情')
+  })
+})

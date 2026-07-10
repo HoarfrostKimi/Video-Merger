@@ -3,11 +3,62 @@ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
 import { join, dirname } from 'path'
 import { writeFileSync, unlinkSync, existsSync, renameSync, mkdirSync, openSync, closeSync, statSync, copyFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 
 // 打包后路径在 app.asar 内，spawn 无法从 asar 虚拟文件系统启动 exe，需重定向到 unpacked 目录
 const FFMPEG_PATH = ffmpegInstaller.path.replace('app.asar', 'app.asar.unpacked')
 ffmpeg.setFfmpegPath(FFMPEG_PATH)
+
+// 活跃的合并任务映射
+const activeMerges = new Map<string, ChildProcess>()
+
+/**
+ * 格式化 FFmpeg 错误信息为友好的中文提示
+ */
+export function formatFfmpegError(stderr: string, exitCode: number): string {
+  const last3Lines = stderr.split('\n').slice(-3).join('\n')
+
+  if (/Permission denied|EACCES/i.test(stderr)) {
+    return '没有权限写入输出目录，请检查输出路径设置'
+  }
+  if (/No such file or directory|ENOENT/i.test(stderr)) {
+    return '源文件未找到，请检查文件是否存在'
+  }
+  if (/Invalid argument|Invalid data found/i.test(stderr)) {
+    return '视频文件格式不兼容或文件损坏'
+  }
+  if (/Cannot allocate memory/i.test(stderr)) {
+    return '系统内存不足，请关闭一些程序后重试'
+  }
+  if (exitCode === 137 || /SIGKILL/i.test(stderr)) {
+    return '合并被系统终止（可能内存不足）'
+  }
+  return `合并失败，源文件可能存在问题。详情：${last3Lines}`
+}
+
+/**
+ * 取消正在进行的合并任务
+ */
+export function cancelMerge(taskId: string): boolean {
+  const child = activeMerges.get(taskId)
+  if (!child) return false
+  try {
+    child.kill('SIGTERM')
+    setTimeout(() => {
+      try { child.kill('SIGKILL') } catch { /* already exited */ }
+    }, 5000)
+  } catch { /* ignore */ }
+  activeMerges.delete(taskId)
+  return true
+}
+
+/**
+ * 获取当前活跃的合并任务 ID
+ */
+export function getActiveMergeTaskId(): string | null {
+  const keys = Array.from(activeMerges.keys())
+  return keys.length > 0 ? keys[0] : null
+}
 
 // 快速探测：只读取文件头信息，不处理整个文件（毫秒级完成）
 function ffmpegProbe(filePath: string): Promise<{
@@ -19,9 +70,19 @@ function ffmpegProbe(filePath: string): Promise<{
   codec: string
 }> {
   return new Promise((resolve) => {
+    const defaultResult = { duration: 0, hasAudio: false, hasVideo: false, width: 0, height: 0, codec: '' }
     // 用 spawn 启动 ffmpeg -i，只读取文件头后立即 kill
     const child = spawn(FFMPEG_PATH, ['-i', filePath])
     let stderr = ''
+    let settled = false
+
+    // 10 秒超时兜底，防止损坏文件导致 spawn 进程永不退出
+    const probeTimeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill('SIGKILL') } catch { /* ignore */ }
+      resolve(defaultResult)
+    }, 10000)
 
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString()
@@ -32,6 +93,10 @@ function ffmpegProbe(filePath: string): Promise<{
     })
 
     child.on('close', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(probeTimeout)
+
       const durationMatch = stderr.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/)
       let duration = 0
       if (durationMatch) {
@@ -52,7 +117,10 @@ function ffmpegProbe(filePath: string): Promise<{
     })
 
     child.on('error', () => {
-      resolve({ duration: 0, hasAudio: false, hasVideo: false, width: 0, height: 0, codec: '未知' })
+      if (settled) return
+      settled = true
+      clearTimeout(probeTimeout)
+      resolve({ duration: 0, hasAudio: false, hasVideo: false, width: 0, height: 0, codec: '' })
     })
   })
 }
@@ -77,17 +145,32 @@ export function getVideoInfo(filePath: string): Promise<{
 }
 
 /**
+ * 安全移动文件：优先 renameSync（同盘原子操作），失败时 fallback 到 copy+unlink（跨盘）
+ */
+function safeMoveFile(src: string, dest: string): void {
+  try {
+    renameSync(src, dest)
+  } catch {
+    // renameSync 不支持跨盘，fallback 到 copy + unlink
+    copyFileSync(src, dest)
+    unlinkSync(src)
+  }
+}
+
+/**
  * 合并多个 FLV 视频文件为一个 MP4 文件
  * 使用 stream copy 模式（不重新编码），速度极快
  * @param filePaths - 要合并的视频文件路径数组
  * @param outputPath - 输出文件路径
  * @param onProgress - 进度回调函数，参数为 0-100 的百分比
+ * @param taskId - 可选的任务 ID，用于取消操作
  * @returns 如果有文件被跳过，返回警告信息；否则返回 undefined
  */
 export function mergeVideos(
   filePaths: string[],
   outputPath: string,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  taskId?: string
 ): Promise<string | undefined> {
   return new Promise(async (resolve, reject) => {
     if (filePaths.length === 0) {
@@ -125,6 +208,7 @@ export function mergeVideos(
     }
 
     let totalDuration = 0
+    let totalSourceSize = 0
     try {
       const firstInfo = await ffmpegProbe(accessibleFiles[0])
       const firstSize = statSync(accessibleFiles[0]).size
@@ -134,6 +218,7 @@ export function mergeVideos(
           totalSize += statSync(f).size
         } catch { /* ignore */ }
       }
+      totalSourceSize = totalSize
       if (firstInfo.duration > 0 && firstSize > 0) {
         const bitrate = firstSize / firstInfo.duration
         totalDuration = totalSize / bitrate
@@ -141,6 +226,24 @@ export function mergeVideos(
       console.log(`估算总时长: ${totalDuration.toFixed(1)}秒 (基于第一个文件推算)`)
     } catch {
       totalDuration = 0
+    }
+
+    // 磁盘空间预检
+    try {
+      const statfs = require('fs').statfsSync
+      if (typeof statfs === 'function') {
+        const stats = statfs(outDir)
+        const availableSpace = stats.bavail * stats.bsize
+        const requiredSpace = totalSourceSize * 1.1
+        if (availableSpace < requiredSpace) {
+          const requiredMB = Math.ceil(requiredSpace / (1024 * 1024))
+          const availableMB = Math.ceil(availableSpace / (1024 * 1024))
+          reject(new Error(`磁盘空间不足，需要 ${requiredMB} MB，剩余 ${availableMB} MB`))
+          return
+        }
+      }
+    } catch {
+      console.warn('警告：无法检查磁盘空间（statfsSync 不可用），跳过空间预检')
     }
 
     const listFile = join(tmpdir(), `merge-list-${Date.now()}.txt`)
@@ -151,20 +254,14 @@ export function mergeVideos(
 
     const tempOutput = join(tmpdir(), `merge-temp-${Date.now()}.mp4`)
 
-    let timedOut = false
-    const timeoutHandle = setTimeout(() => {
-      timedOut = true
-      try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
-      try { if (existsSync(listFile)) unlinkSync(listFile) } catch { /* ignore */ }
-      reject(new Error('合并超时（30分钟），部分源文件可能正在录制中'))
-    }, 30 * 60 * 1000)
-
     // 一步到位：concat demuxer 直接拼接 FLV 并输出为 MP4（stream copy，不重新编码）
+    // 添加 -progress pipe:2 让 FFmpeg 以行缓冲模式输出进度到 stderr
     const args = [
       '-f', 'concat',
       '-safe', '0',
       '-i', listFile,
       '-c', 'copy',
+      '-progress', 'pipe:2',
       '-y',
       tempOutput
     ]
@@ -172,12 +269,44 @@ export function mergeVideos(
     console.log('FFmpeg 合并命令: ffmpeg', args.join(' '))
 
     const child = spawn(FFMPEG_PATH, args)
+
+    // 注册到活跃合并映射
+    if (taskId) {
+      activeMerges.set(taskId, child)
+    }
+
+    // 超时设置（放在 child 声明之后，以便回调中引用 child）
+    let timedOut = false
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true
+      try { child.kill('SIGTERM') } catch { /* ignore */ }
+      setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* already exited */ }
+      }, 5000)
+      try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
+      try { if (existsSync(listFile)) unlinkSync(listFile) } catch { /* ignore */ }
+      if (taskId) activeMerges.delete(taskId)
+      reject(new Error('合并超时（30分钟），部分源文件可能正在录制中'))
+    }, 30 * 60 * 1000)
+
     let stderrBuf = ''
 
-    // 实时解析 stderr 中的进度信息
+    // 实时解析 stderr 中的进度信息（保留原有 time= 解析作为 fallback）
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString()
       stderrBuf += text
+
+      // 优先解析 -progress 格式的 out_time_ms（微秒）
+      const progressMatch = text.match(/out_time_ms=(\d+)/)
+      if (progressMatch && onProgress && totalDuration > 0) {
+        const currentSeconds = parseInt(progressMatch[1]) / 1_000_000
+        const percent = Math.min((currentSeconds / totalDuration) * 100, 99.9)
+        console.log(`[进度] ${currentSeconds.toFixed(1)}s/${totalDuration.toFixed(1)}s = ${percent.toFixed(1)}%`)
+        onProgress(percent)
+        return
+      }
+
+      // fallback: 解析传统 time= 格式
       const timeMatch = text.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/)
       if (timeMatch && onProgress && totalDuration > 0) {
         const currentSeconds =
@@ -193,20 +322,28 @@ export function mergeVideos(
     child.on('close', (code) => {
       if (timedOut) return
       clearTimeout(timeoutHandle)
+      if (taskId) activeMerges.delete(taskId)
 
       // 清理列表文件
       try { if (existsSync(listFile)) unlinkSync(listFile) } catch { /* ignore */ }
 
       if (code !== 0) {
-        const lastLines = stderrBuf.split('\n').slice(-10).join('\n')
-        console.error('FFmpeg 合并失败, exit code:', code, '\n', lastLines)
+        const friendlyMsg = formatFfmpegError(stderrBuf, code ?? -1)
+        console.error('FFmpeg 合并失败, exit code:', code, '\n', stderrBuf.split('\n').slice(-20).join('\n'))
         try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
-        reject(new Error(`合并失败 (exit code ${code})`))
+        reject(new Error(friendlyMsg))
         return
       }
 
-      // 合并成功，移动输出文件
+      // 合并成功，安全移动输出文件
       try {
+        // 确认 tempOutput 存在且有效
+        const tempStat = statSync(tempOutput)
+        if (!existsSync(tempOutput) || tempStat.size === 0) {
+          reject(new Error('合并产出的文件无效（大小为 0 或不存在）'))
+          return
+        }
+
         if (existsSync(outputPath)) {
           try {
             unlinkSync(outputPath)
@@ -222,8 +359,15 @@ export function mergeVideos(
             }
           }
         }
-        copyFileSync(tempOutput, outputPath)
-        unlinkSync(tempOutput)
+
+        safeMoveFile(tempOutput, outputPath)
+
+        // 验证目标文件存在且大小 > 0
+        if (!existsSync(outputPath) || statSync(outputPath).size === 0) {
+          reject(new Error('输出文件验证失败：文件不存在或大小为 0'))
+          return
+        }
+
         const msg = lockedFiles.length > 0
           ? `合并完成！但跳过了${lockedFiles.length}个正在录制中的片段`
           : undefined
@@ -237,6 +381,7 @@ export function mergeVideos(
     child.on('error', (err) => {
       if (timedOut) return
       clearTimeout(timeoutHandle)
+      if (taskId) activeMerges.delete(taskId)
       try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
       try { if (existsSync(listFile)) unlinkSync(listFile) } catch { /* ignore */ }
       reject(new Error(`启动 FFmpeg 失败: ${err.message}`))
@@ -266,8 +411,9 @@ export function convertToMp4(
     }
 
     const tempOutput = join(tmpdir(), `convert-temp-${Date.now()}.mp4`)
+    let timedOut = false
 
-    ffmpeg(filePath)
+    const command = ffmpeg(filePath)
       .output(tempOutput)
       .videoCodec('libx264')
       .audioCodec('aac')
@@ -281,14 +427,15 @@ export function convertToMp4(
         }
       })
       .on('end', () => {
+        if (timedOut) return
+        clearTimeout(timeoutHandle)
         try {
           if (existsSync(outputPath)) {
             try { unlinkSync(outputPath) } catch {
-              renameSync(outputPath, outputPath.replace(/\.mp4$/i, '_backup.mp4'))
+              try { renameSync(outputPath, outputPath.replace(/\.mp4$/i, '_backup.mp4')) } catch { /* ignore */ }
             }
           }
-          copyFileSync(tempOutput, outputPath)
-          unlinkSync(tempOutput)
+          safeMoveFile(tempOutput, outputPath)
           resolve()
         } catch (err: any) {
           try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
@@ -296,9 +443,23 @@ export function convertToMp4(
         }
       })
       .on('error', (err) => {
+        if (timedOut) return
+        clearTimeout(timeoutHandle)
         try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
         reject(new Error(`转换失败: ${err.message}`))
       })
-      .run()
+
+    // 30 分钟超时机制
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true
+      try { command.kill('SIGTERM') } catch { /* ignore */ }
+      setTimeout(() => {
+        try { command.kill('SIGKILL') } catch { /* already exited */ }
+      }, 5000)
+      try { if (existsSync(tempOutput)) unlinkSync(tempOutput) } catch { /* ignore */ }
+      reject(new Error('转换超时（30分钟）'))
+    }, 30 * 60 * 1000)
+
+    command.run()
   })
 }

@@ -30,7 +30,7 @@ const api = {
   openExternal: (url: string) => invokeApi('dialog:openExternal', url),
 
   // 文件扫描
-scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => invokeApi('scan:flvFiles', folderPath, maxIntervalHours),
+scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: string) => invokeApi('scan:flvFiles', folderPath, maxIntervalHours, outputFolder),
 
   // 视频处理
   getVideoInfo: (filePath: string) => invokeApi('video:getInfo', filePath),
@@ -54,6 +54,27 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => invokeApi('scan
   // 最小化外部浏览器窗口
   getForegroundWindow: () => invokeApi('browser:getForegroundWindow'),
   minimizeBrowser: (prevHwnd: number) => invokeApi('browser:minimize', prevHwnd),
+
+  // 手机控制面板
+  getControlUrl: () => invokeApi('control:getUrl'),
+  getLocalIP: () => invokeApi('control:getIP'),
+  toggleControlServer: (enabled: boolean, port?: number) => invokeApi('control:toggle', enabled, port),
+  getNetworkInfo: () => invokeApi('network:getInfo'),
+
+  // 已合并文件（投稿页）
+  getMergedFiles: () => invokeApi('mergedFiles:get'),
+  uploadMergedFiles: (filePaths: string[]) => invokeApi('mergedFiles:upload', filePaths),
+
+  // 后台运行
+  minimizeToTray: () => invokeApi('window:minimizeToTray'),
+  restoreFromTray: () => invokeApi('window:restoreFromTray'),
+  forceQuit: () => invokeApi('app:forceQuit'),
+
+  // 配置变更监听（手机端操作后同步）
+  onConfigUpdated: (callback: () => void) => {
+    ipcRenderer.on('config:updated', callback)
+    return () => ipcRenderer.removeListener('config:updated', callback)
+  },
 }
 
 if (process.contextIsolated) {

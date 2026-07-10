@@ -1,17 +1,44 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, NativeImage } from 'electron'
 import { join, relative, dirname, extname, basename } from 'path'
-import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, createReadStream } from 'fs'
+import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, createReadStream, watch, renameSync, unlinkSync } from 'fs'
+import { readdir, stat } from 'fs/promises'
 import { createServer, Server } from 'http'
 import { execFile } from 'child_process'
+import { freemem } from 'os'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { createHash } from 'crypto'
 import { getVideoInfo, convertToMp4, mergeVideos } from './ffmpeg'
+import {
+  startControlServer,
+  stopControlServer,
+  getControlUrl,
+  getLocalIP,
+  getControlPort,
+  setConfigCallbacks,
+  refreshConfig,
+  setFileServerCallback,
+  setOpenExternalCallback,
+  setScanCallback,
+  updateScanResults,
+  setUpdateHiddenKeysCallback,
+  setUploadDoneCallback,
+  setResetUploadDoneCallback,
+  setIsMainAppMergingCallback,
+  setMergeLockCallbacks
+} from './controlServer'
+import * as mergedFiles from './mergedFiles'
 
 let mainWindow: BrowserWindow | null = null
 
 // 进度存储（渲染进程通过轮询获取，不依赖 contextBridge 的监听器回调）
 let mergeProgress = 0
 let convertProgress = 0
+
+// 合并互斥锁（防止桌面端和手机端同时合并）
+let isMerging = false
+
+export function getIsMerging(): boolean { return isMerging }
+export function setIsMerging(value: boolean): void { isMerging = value }
 
 // 批量合并进度存储：Map<taskId, progress>
 const batchMergeProgress = new Map<string, number>()
@@ -20,8 +47,10 @@ const batchMergeProgress = new Map<string, number>()
 
 let fileServer: Server | null = null
 let fileServerPort = 0
-const servedFiles = new Map<string, string>() // fileId -> filePath
+const servedFiles = new Map<string, { filePath: string; lastAccess: number }>() // fileId -> { filePath, lastAccess }
 let uploadDone = false // 插件投稿完成信号
+let uploadDoneTimer: NodeJS.Timeout | null = null // 超时自动重置
+const UPLOAD_DONE_TIMEOUT = 15 * 60 * 1000 // 15分钟超时
 
 /** 启动本地文件服务器（如果还没启动） */
 function ensureFileServer(): Promise<number> {
@@ -33,6 +62,13 @@ function ensureFileServer(): Promise<number> {
       // 处理插件完成信号
       if (url.searchParams.get('signal') === 'done') {
         uploadDone = true
+        // 启动超时自动重置（防止插件异常未发送重置信号时状态卡死）
+        if (uploadDoneTimer) clearTimeout(uploadDoneTimer)
+        uploadDoneTimer = setTimeout(() => {
+          uploadDone = false
+          uploadDoneTimer = null
+          console.log('[FileServer] 投稿完成状态超时，已自动重置')
+        }, UPLOAD_DONE_TIMEOUT)
         console.log('[FileServer] 收到插件完成信号')
         res.writeHead(200, {
           'Access-Control-Allow-Origin': '*',
@@ -48,17 +84,31 @@ function ensureFileServer(): Promise<number> {
         res.end('File not found')
         return
       }
-      const filePath = servedFiles.get(fileId)!
-      const stat = statSync(filePath)
-      const ext = extname(filePath).toLowerCase()
-      const mime = ext === '.mp4' ? 'video/mp4' : 'application/octet-stream'
-      res.writeHead(200, {
-        'Content-Type': mime,
-        'Content-Length': stat.size,
-        'Access-Control-Allow-Origin': '*',
-        'Accept-Ranges': 'bytes'
-      })
-      createReadStream(filePath).pipe(res)
+      const fileInfo = servedFiles.get(fileId)!
+      fileInfo.lastAccess = Date.now() // 更新访问时间
+      const filePath = fileInfo.filePath
+      try {
+        const stat = statSync(filePath)
+        const ext = extname(filePath).toLowerCase()
+        const mime = ext === '.mp4' ? 'video/mp4' : 'application/octet-stream'
+        res.writeHead(200, {
+          'Content-Type': mime,
+          'Content-Length': stat.size,
+          'Access-Control-Allow-Origin': '*',
+          'Accept-Ranges': 'bytes'
+        })
+        const stream = createReadStream(filePath)
+        stream.on('error', (err) => {
+          console.error('[FileServer] 读取文件失败:', err.message)
+          if (!res.headersSent) res.writeHead(500)
+          res.end('Internal error')
+        })
+        stream.pipe(res)
+      } catch (err) {
+        console.error('[FileServer] 文件访问异常:', (err as Error).message)
+        if (!res.headersSent) res.writeHead(404)
+        res.end('File not found')
+      }
     })
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address()
@@ -79,10 +129,23 @@ function ensureFileServer(): Promise<number> {
 async function registerFileForServe(filePath: string): Promise<string> {
   const port = await ensureFileServer()
   const fileId = createHash('sha256').update(filePath).digest('hex').slice(0, 16)
-  servedFiles.set(fileId, filePath)
+  servedFiles.set(fileId, { filePath, lastAccess: Date.now() })
   const fileName = basename(filePath)
   return `http://127.0.0.1:${port}/?fileId=${fileId}&name=${encodeURIComponent(fileName)}`
 }
+
+/** 清理过期的文件注册（30分钟未访问） */
+function cleanupServedFiles(): void {
+  const now = Date.now()
+  const MAX_AGE = 30 * 60 * 1000 // 30分钟
+  for (const [fileId, info] of servedFiles.entries()) {
+    if (now - info.lastAccess > MAX_AGE) {
+      servedFiles.delete(fileId)
+    }
+  }
+}
+// 每小时清理一次过期文件注册
+setInterval(cleanupServedFiles, 60 * 60 * 1000)
 
 /** 获取当前前台窗口句柄（Windows） */
 function getForegroundWindow(): Promise<number> {
@@ -128,6 +191,8 @@ public class Win32 {
 
 // ============ 配置管理：记住用户设置 ============
 
+let configCache: AppConfig | null = null
+
 interface AppConfig {
   inputFolder?: string
   outputFolder?: string
@@ -139,6 +204,9 @@ interface AppConfig {
   autoOpenFolder?: boolean
   autoCloseBrowser?: boolean
   autoCloseApp?: boolean
+  runInBackground?: boolean
+  controlEnabled?: boolean
+  controlPort?: number
   hiddenFolderKeys?: string[]
 }
 
@@ -151,12 +219,16 @@ function getConfigPath(): string {
 }
 
 function loadConfig(): AppConfig {
+  if (configCache) return configCache
   try {
     const path = getConfigPath()
-    console.log('[loadConfig] 路径:', path)
     if (existsSync(path)) {
       const data = JSON.parse(readFileSync(path, 'utf-8'))
-      console.log('[loadConfig] 读取到:', JSON.stringify(data))
+      // 只打印非敏感信息（不打印密码）
+      const safeData = { ...data }
+      if (safeData.controlPassword) safeData.controlPassword = '***'
+      console.log('[loadConfig] 读取到:', JSON.stringify(safeData))
+      configCache = data
       return data
     }
     console.log('[loadConfig] 文件不存在')
@@ -168,18 +240,147 @@ function loadConfig(): AppConfig {
 
 function saveConfig(config: AppConfig): void {
   try {
-    const current = loadConfig()
+    const current = configCache || loadConfig()
     const merged = { ...current, ...config }
     const path = getConfigPath()
     console.log('[saveConfig] 写入:', JSON.stringify(merged))
-    writeFileSync(path, JSON.stringify(merged, null, 2), 'utf-8')
+    // 原子写入：先写临时文件再重命名，防止写入中断导致配置损坏
+    const tmpPath = path + '.tmp'
+    writeFileSync(tmpPath, JSON.stringify(merged, null, 2), 'utf-8')
+    renameSync(tmpPath, path)
+    configCache = merged
     console.log('[saveConfig] 写入成功')
   } catch (e) {
     console.error('[saveConfig] 写入失败:', e)
   }
 }
 
+function invalidateConfigCache(): void {
+  configCache = null
+}
+
+// ============ 配置文件监听（手机端修改配置时同步到电脑端） ============
+
+let configWatcher: ReturnType<typeof watch> | null = null
+let lastConfigMtime = 0
+let configDebounceTimer: NodeJS.Timeout | null = null // 防抖计时器
+
+/** 启动配置文件监听 */
+function startConfigWatcher(): void {
+  if (configWatcher) return
+  const configPath = getConfigPath()
+  if (!existsSync(configPath)) return
+
+  // 启动时清理可能残留的 .tmp 文件（上次原子写入中断导致）
+  const tmpPath = configPath + '.tmp'
+  if (existsSync(tmpPath)) {
+    try {
+      unlinkSync(tmpPath)
+      console.log('[startConfigWatcher] 清理残留临时文件:', tmpPath)
+    } catch (e) {
+      console.warn('[startConfigWatcher] 清理临时文件失败:', e)
+    }
+  }
+
+  try {
+    const stat = statSync(configPath)
+    lastConfigMtime = stat.mtimeMs
+
+    configWatcher = watch(configPath, (eventType) => {
+      if (eventType === 'change' && mainWindow) {
+        // 防抖：500ms 内的多次变更只触发一次
+        if (configDebounceTimer) clearTimeout(configDebounceTimer)
+        configDebounceTimer = setTimeout(() => {
+          configDebounceTimer = null
+          try {
+            const stat = statSync(configPath)
+            if (stat.mtimeMs !== lastConfigMtime) {
+              lastConfigMtime = stat.mtimeMs
+              // 清除配置缓存，下次读取时重新加载
+              invalidateConfigCache()
+              // 刷新控制服务器的配置缓存
+              refreshConfig()
+              // 通知渲染进程配置已变
+              mainWindow.webContents.send('config-changed')
+              console.log('[configWatcher] 配置文件变更，已通知渲染进程')
+            }
+          } catch (e) {
+            // 文件可能正在写入，忽略错误
+          }
+        }, 500)
+      }
+    })
+    console.log('[configWatcher] 已开始监听配置文件')
+  } catch (e) {
+    console.error('[configWatcher] 启动监听失败:', e)
+  }
+}
+
+/** 停止配置文件监听 */
+function stopConfigWatcher(): void {
+  if (configWatcher) {
+    configWatcher.close()
+    configWatcher = null
+    console.log('[configWatcher] 已停止监听')
+  }
+}
+
 // ============ 窗口创建 ============
+
+let appTray: Tray | null = null
+let forceQuit = false // 为 true 时关闭窗口真正退出，否则隐藏到托盘
+
+/** 创建系统托盘图标 */
+function createTray(): void {
+  if (appTray) return
+  // 用代码生成一个简单的 16x16 托盘图标（蓝色圆形 + V 字母）
+  const icon = nativeImage.createFromDataURL(
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAhElEQVQ4T2NkoBAwUqifYdAY8B8E/v9nYPz/H8wAM4BxMBjwn+E/AwMDIyMDYzADshDFDIb/DAz/GRn+M/zHxQOm/wwM/8EMFkYYA1AM+M/AwMjIwMjIAMwwDLIA2YB/DAwM/0EMFkYYA1AM+M/AwMjIwMjIAMwwDLIAxYB/DAwM/0EMAAHEf5ZB7P+0AAAAAElFTkSuQmCC'
+  )
+  appTray = new Tray(icon)
+  appTray.setToolTip('视频合并工具')
+  updateTrayMenu()
+  // 双击托盘图标显示窗口
+  appTray.on('double-click', () => {
+    if (mainWindow) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
+
+/** 更新托盘右键菜单 */
+function updateTrayMenu(): void {
+  if (!appTray) return
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示窗口',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show()
+          mainWindow.focus()
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        forceQuit = true
+        app.quit()
+      }
+    }
+  ])
+  appTray.setContextMenu(contextMenu)
+}
+
+/** 销毁托盘图标 */
+function destroyTray(): void {
+  if (appTray) {
+    appTray.destroy()
+    appTray = null
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -197,6 +398,22 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow!.show()
+  })
+
+  // 拦截关闭窗口：后台运行模式下隐藏到托盘而不是退出
+  mainWindow.on('close', (e) => {
+    if (!forceQuit) {
+      const config = loadConfig()
+      if (config.runInBackground) {
+        e.preventDefault()
+        mainWindow!.hide()
+        console.log('[App] 窗口已隐藏到托盘')
+      }
+    }
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -258,79 +475,111 @@ function stripVideoExtension(fileName: string): string {
 }
 
 // 2. 扫描文件夹中的视频文件（按日期+标题分组判断是否为同一场直播）
-ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHours: number = 2.5) => {
-  try {
-    interface FlvFile {
-      name: string
-      path: string
-      size: number
-      modifiedAt: string
-    }
+// 提取为独立函数，供 IPC 和控制服务器共享
+async function performScan(
+  folderPath: string,
+  maxIntervalHours: number = 2.5,
+  outputFolder: string = ''
+): Promise<{
+  rootPath: string
+  folders: Array<{
+    key: string
+    folderName: string
+    folderPath: string
+    fileCount: number
+    totalSize: number
+    files: Array<{ name: string; path: string; size: number; modifiedAt: string }>
+    date: string
+    title: string
+    lastTimestamp: number
+  }>
+}> {
+  interface FlvFile {
+    name: string
+    path: string
+    size: number
+    modifiedAt: string
+  }
 
-    interface FileInfo extends FlvFile {
-      date: string
-      time: string
-      title: string
-      timestamp: number
-    }
+  interface FileInfo extends FlvFile {
+    date: string
+    time: string
+    title: string
+    timestamp: number
+  }
 
-    const files: FileInfo[] = []
+  const files: FileInfo[] = []
 
-    const parseFileName = (fileName: string): { date: string; time: string; title: string } => {
-      const nameWithoutExt = stripVideoExtension(fileName)
-      const match = nameWithoutExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
-      if (match) {
-        return {
-          date: match[1],
-          time: match[2],
-          title: match[3].trim() || '未命名'
-        }
-      }
+  const parseFileName = (fileName: string): { date: string; time: string; title: string } => {
+    // 去掉 _PART00X 后缀，让同一场直播的 PART 文件和非 PART 文件归到同一组
+    const nameWithoutExt = stripVideoExtension(fileName).replace(/_PART\d+$/i, '')
+    const match = nameWithoutExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
+    if (match) {
       return {
-        date: '未知日期',
-        time: '未知时间',
-        title: nameWithoutExt.trim() || '未命名'
+        date: match[1],
+        time: match[2],
+        title: match[3].trim() || '未命名'
       }
     }
+    return {
+      date: '未知日期',
+      time: '未知时间',
+      title: nameWithoutExt.trim() || '未命名'
+    }
+  }
 
-    const scanDir = (dir: string): void => {
-      const entries = readdirSync(dir)
-      for (const entry of entries) {
-        if (entry.startsWith('.')) continue
-        const fullPath = join(dir, entry)
-        try {
-          const s = statSync(fullPath)
-          if (s.isDirectory()) {
-            scanDir(fullPath)
-          } else if (isVideoFile(entry)) {
-            const { date, time, title } = parseFileName(entry)
-            const timeParts = time.split('-')
-            const timestamp = timeParts.length >= 4
-              ? new Date(`${date}T${timeParts[0]}:${timeParts[1]}:${timeParts[2]}`).getTime()
-              : s.mtime.getTime()
+  const scanDir = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const fullPath = join(dir, entry.name)
+      try {
+        if (entry.isDirectory()) {
+          await scanDir(fullPath)
+        } else if (entry.isFile() && isVideoFile(entry.name)) {
+          const s = await stat(fullPath)
+          const { date, time, title } = parseFileName(entry.name)
+          console.log(`[scanDir] 发现文件: ${entry.name} => date=${date}, time=${time}, title=${title}`)
+          const timeParts = time.split('-')
+          const timestamp = timeParts.length >= 4
+            ? new Date(`${date}T${timeParts[0]}:${timeParts[1]}:${timeParts[2]}`).getTime()
+            : s.mtime.getTime()
 
-            files.push({
-              name: entry,
-              path: fullPath,
-              size: s.size,
-              modifiedAt: s.mtime.toISOString(),
-              date,
-              time,
-              title,
-              timestamp
-            })
-          }
-        } catch {
-          // 跳过无法访问的文件
+          files.push({
+            name: entry.name,
+            path: fullPath,
+            size: s.size,
+            modifiedAt: s.mtime.toISOString(),
+            date,
+            time,
+            title,
+            timestamp
+          })
         }
+      } catch {
+        // 跳过无法访问的文件
       }
     }
+  }
 
-    scanDir(folderPath)
+  await scanDir(folderPath)
 
-    files.sort((a, b) => a.timestamp - b.timestamp)
+  files.sort((a, b) => a.timestamp - b.timestamp)
 
-    const groups: Array<{
+  const groups: Array<{
+    key: string
+    folderName: string
+    folderPath: string
+    fileCount: number
+    totalSize: number
+    files: FlvFile[]
+    date: string
+    title: string
+    lastTimestamp: number
+  }> = []
+
+  if (files.length > 0) {
+    let currentGroup: {
       key: string
       folderName: string
       folderPath: string
@@ -340,120 +589,144 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
       date: string
       title: string
       lastTimestamp: number
-    }> = []
+    } | null = null
 
-    if (files.length > 0) {
-      let currentGroup: {
-        key: string
-        folderName: string
-        folderPath: string
-        fileCount: number
-        totalSize: number
-        files: FlvFile[]
-        date: string
-        title: string
-        lastTimestamp: number
-      } | null = null
+    const MAX_INTERVAL_MS = maxIntervalHours * 60 * 60 * 1000
 
-      const MAX_INTERVAL_MS = maxIntervalHours * 60 * 60 * 1000
+    for (const file of files) {
+      if (!currentGroup) {
+        currentGroup = {
+          key: `${file.date}_${file.title}`,
+          folderName: `${file.date} ${file.title}`,
+          folderPath: dirname(file.path),
+          fileCount: 1,
+          totalSize: file.size,
+          files: [file],
+          date: file.date,
+          title: file.title,
+          lastTimestamp: file.timestamp
+        }
+      } else {
+        const interval = file.timestamp - currentGroup.lastTimestamp
 
-      for (const file of files) {
-        if (!currentGroup) {
-          currentGroup = {
-            key: `${file.date}_${file.title}`,
-            folderName: `${file.date} ${file.title}`,
-            folderPath: dirname(file.path),
-            fileCount: 1,
-            totalSize: file.size,
-            files: [file],
-            date: file.date,
-            title: file.title,
-            lastTimestamp: file.timestamp
-          }
+        if (file.title === currentGroup.title && interval <= MAX_INTERVAL_MS) {
+          // 和当前分组标题相同且间隔在阈值内，直接加入
+          currentGroup.fileCount++
+          currentGroup.totalSize += file.size
+          currentGroup.files.push(file)
+          currentGroup.lastTimestamp = file.timestamp
         } else {
-          const interval = file.timestamp - currentGroup.lastTimestamp
-
-          if (file.title === currentGroup.title && interval <= MAX_INTERVAL_MS) {
-            // 和当前分组标题相同且间隔在阈值内，直接加入
-            currentGroup.fileCount++
-            currentGroup.totalSize += file.size
-            currentGroup.files.push(file)
-            currentGroup.lastTimestamp = file.timestamp
-          } else {
-            // 标题不同或间隔太大，先搜索所有已有分组看能否合并
-            let matched = false
-            for (const group of groups) {
-              if (group.title === file.title && group.date === file.date) {
-                const gap = file.timestamp - group.lastTimestamp
-                if (gap <= MAX_INTERVAL_MS) {
-                  group.fileCount++
-                  group.totalSize += file.size
-                  group.files.push(file)
-                  group.lastTimestamp = file.timestamp
-                  matched = true
-                  break
-                }
-              }
-            }
-            if (!matched) {
-              // 没有匹配的已有分组，先保存当前分组，再创建新分组
-              groups.push(currentGroup)
-              currentGroup = {
-                key: `${file.date}_${file.title}`,
-                folderName: `${file.date} ${file.title}`,
-                folderPath: dirname(file.path),
-                fileCount: 1,
-                totalSize: file.size,
-                files: [file],
-                date: file.date,
-                title: file.title,
-                lastTimestamp: file.timestamp
+          // 标题不同或间隔太大，先搜索所有已有分组看能否合并
+          let matched = false
+          for (const group of groups) {
+            if (group.title === file.title && group.date === file.date) {
+              const gap = file.timestamp - group.lastTimestamp
+              if (gap <= MAX_INTERVAL_MS) {
+                group.fileCount++
+                group.totalSize += file.size
+                group.files.push(file)
+                group.lastTimestamp = file.timestamp
+                matched = true
+                break
               }
             }
           }
-        }
-      }
-
-      if (currentGroup) {
-        groups.push(currentGroup)
-      }
-    }
-
-    groups.sort((a, b) => b.fileCount - a.fileCount || b.date.localeCompare(a.date))
-
-    const hasMergedVideo = (dir: string, date: string, title: string): boolean => {
-      try {
-        const entries = readdirSync(dir)
-        for (const entry of entries) {
-          if (!entry.toLowerCase().endsWith('.mp4')) continue
-          const entryLower = entry.toLowerCase()
-          const dateLower = date.toLowerCase()
-          const titleLower = title.toLowerCase()
-          if (entryLower.includes(dateLower) && entryLower.includes(titleLower)) {
-            return true
-          }
-        }
-        for (const entry of entries) {
-          const fullPath = join(dir, entry)
-          try {
-            if (statSync(fullPath).isDirectory() && entry !== '.') {
-              if (hasMergedVideo(fullPath, date, title)) return true
+          if (!matched) {
+            // 没有匹配的已有分组，先保存当前分组，再创建新分组
+            groups.push(currentGroup)
+            currentGroup = {
+              key: `${file.date}_${file.title}`,
+              folderName: `${file.date} ${file.title}`,
+              folderPath: dirname(file.path),
+              fileCount: 1,
+              totalSize: file.size,
+              files: [file],
+              date: file.date,
+              title: file.title,
+              lastTimestamp: file.timestamp
             }
-          } catch {
-            // 跳过无法访问的目录
           }
         }
-      } catch {
-        // 目录不存在
       }
-      return false
     }
 
-    const filteredGroups = groups.filter((group) => {
-      return !hasMergedVideo(folderPath, group.date, group.title)
-    })
+    if (currentGroup) {
+      groups.push(currentGroup)
+    }
+  }
 
-    return { success: true, data: { rootPath: folderPath, folders: filteredGroups } }
+  groups.sort((a, b) => b.fileCount - a.fileCount || b.date.localeCompare(a.date))
+
+  console.log(`[performScan] 共找到 ${files.length} 个文件，分成 ${groups.length} 组`)
+  groups.forEach((g, i) => {
+    console.log(`[performScan] 组${i}: key=${g.key}, fileCount=${g.fileCount}, files=${g.files.map(f => f.name).join(', ')}`)
+  })
+
+  // 过滤掉正在录制中的直播：整场直播只要有任何 PART 文件，整组都不显示
+  const isRecording = (group: { files: FlvFile[] }): boolean =>
+    group.files.some((f) => /_PART\d+/i.test(f.name))
+  const nonRecordingGroups = groups.filter((g) => !isRecording(g))
+
+  // 过滤掉已经合并过的分组（输出文件夹中已有对应 MP4）
+  // 优化：一次性扫描输出文件夹，构建已合并文件的 Set，避免每个分组都递归扫描
+  const hasMergedVideo = (dir: string, date: string, title: string, mergedSet: Set<string>): boolean => {
+    const dateLower = date.toLowerCase()
+    const titleLower = title.toLowerCase()
+    // 检查 Set 中是否有匹配的已合并文件
+    for (const entry of mergedSet) {
+      const entryLower = entry.toLowerCase()
+      if (entryLower.startsWith(dateLower) && entryLower.includes(titleLower)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  // 一次性扫描输出文件夹，收集所有 MP4 文件名
+  const collectMergedFiles = (dir: string, result: Set<string>): void => {
+    try {
+      const entries = readdirSync(dir)
+      for (const entry of entries) {
+        if (entry.toLowerCase().endsWith('.mp4')) {
+          result.add(entry)
+        }
+        const fullPath = join(dir, entry)
+        try {
+          if (statSync(fullPath).isDirectory() && entry !== '.' && !entry.startsWith('.')) {
+            collectMergedFiles(fullPath, result)
+          }
+        } catch {
+          // 跳过无法访问的目录
+        }
+      }
+    } catch {
+      // 目录不存在
+    }
+  }
+
+  // 在输出文件夹中搜索已合并的 MP4（合并后的文件保存在输出文件夹，不是输入文件夹）
+  const searchDir = outputFolder || folderPath
+  const mergedFilesSet = new Set<string>()
+  collectMergedFiles(searchDir, mergedFilesSet)
+  
+  const filteredGroups = nonRecordingGroups.filter((group) => {
+    return !hasMergedVideo(searchDir, group.date, group.title, mergedFilesSet)
+  })
+
+  console.log(`[performScan] 过滤后剩余 ${filteredGroups.length} 组`)
+  return { rootPath: folderPath, folders: filteredGroups }
+}
+
+// IPC 处理器：渲染进程调用扫描
+ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHours: number = 2.5, outputFolder: string = '') => {
+  try {
+    const result = await performScan(folderPath, maxIntervalHours, outputFolder)
+    // 同步扫描结果到控制服务器（手机列表与 App 一致，包含排除列表过滤）
+    const latestConfig = loadConfig()
+    const hiddenKeys = new Set(latestConfig.hiddenFolderKeys || [])
+    const filteredForControl = result.folders.filter((f) => !hiddenKeys.has(f.key))
+    updateScanResults(filteredForControl)
+    return { success: true, data: result }
   } catch (error: any) {
     return { success: false, message: error.message || '扫描失败' }
   }
@@ -504,6 +777,12 @@ ipcMain.handle('video:getInfo', async (_event, filePath: string) => {
 
 // 5. 合并视频
 ipcMain.handle('video:merge', async (event, filePaths: string[], outputPath: string) => {
+  // 检查是否正在合并（防止与手机端冲突）
+  if (isMerging) {
+    return { success: false, message: '当前忙碌，请等待合并完成' }
+  }
+  isMerging = true
+
   try {
     mergeProgress = 0
     const warning = await mergeVideos(filePaths, outputPath, (percent) => {
@@ -514,6 +793,8 @@ ipcMain.handle('video:merge', async (event, filePaths: string[], outputPath: str
   } catch (error: any) {
     mergeProgress = 0
     return { success: false, message: error.message }
+  } finally {
+    isMerging = false
   }
 })
 
@@ -534,53 +815,90 @@ interface BatchMergeResult {
 }
 
 ipcMain.handle('video:batchMerge', async (_event, tasks: BatchMergeTask[], concurrency: number = 3) => {
-  // 初始化所有任务的进度为0
-  for (const task of tasks) {
-    batchMergeProgress.set(task.taskId, 0)
+  // 检查是否正在合并（防止与手机端冲突）
+  if (isMerging) {
+    return { success: false, message: '当前忙碌，请等待合并完成' }
   }
+  isMerging = true
 
-  const results: BatchMergeResult[] = []
-  let currentIndex = 0
+  try {
+    // 并发上限限制为 4（即使设置中写了更大值）
+    const MAX_CONCURRENCY = 4
+    const effectiveConcurrency = Math.min(concurrency, MAX_CONCURRENCY, tasks.length)
+    if (effectiveConcurrency < concurrency) {
+      console.log(`[batchMerge] 并发数从 ${concurrency} 降低到 ${effectiveConcurrency}（上限 ${MAX_CONCURRENCY}）`)
+    }
 
-  // 工作函数：从任务队列中取出任务执行
-  const worker = async (): Promise<void> => {
-    while (currentIndex < tasks.length) {
-      const taskIndex = currentIndex++
-      const task = tasks[taskIndex]
+    // 初始化所有任务的进度为0
+    for (const task of tasks) {
+      batchMergeProgress.set(task.taskId, 0)
+    }
 
-      try {
-        const warning = await mergeVideos(task.filePaths, task.outputPath, (percent) => {
-          batchMergeProgress.set(task.taskId, percent)
-        })
-        batchMergeProgress.set(task.taskId, 100)
-        results.push({
-          taskId: task.taskId,
-          folderName: task.folderName,
-          success: true,
-          warning
-        })
-      } catch (error: any) {
-        batchMergeProgress.set(task.taskId, -1) // -1 表示失败
-        results.push({
-          taskId: task.taskId,
-          folderName: task.folderName,
-          success: false,
-          error: error.message
-        })
+    const results: BatchMergeResult[] = []
+    let currentIndex = 0
+
+    const FREE_MEM_THRESHOLD = 500 * 1024 * 1024 // 500MB
+
+    // 工作函数：从任务队列中取出任务执行
+    const worker = async (): Promise<void> => {
+      while (currentIndex < tasks.length) {
+        const taskIndex = currentIndex++
+        const task = tasks[taskIndex]
+
+        // 内存检测：启动新任务前检查可用内存
+        if (freemem() < FREE_MEM_THRESHOLD) {
+          console.warn('[App] 内存不足，等待当前进行中的合并任务完成')
+          // 等待 3 秒后重试检查
+          await new Promise((r) => setTimeout(r, 3000))
+          if (freemem() < FREE_MEM_THRESHOLD) {
+            console.warn('[App] 内存仍然不足，跳过剩余任务')
+            results.push({
+              taskId: task.taskId,
+              folderName: task.folderName,
+              success: false,
+              error: '内存不足，任务跳过'
+            })
+            batchMergeProgress.set(task.taskId, -1)
+            continue
+          }
+        }
+
+        try {
+          const warning = await mergeVideos(task.filePaths, task.outputPath, (percent) => {
+            batchMergeProgress.set(task.taskId, percent)
+          })
+          batchMergeProgress.set(task.taskId, 100)
+          results.push({
+            taskId: task.taskId,
+            folderName: task.folderName,
+            success: true,
+            warning
+          })
+        } catch (error: any) {
+          batchMergeProgress.set(task.taskId, -1) // -1 表示失败
+          results.push({
+            taskId: task.taskId,
+            folderName: task.folderName,
+            success: false,
+            error: error.message
+          })
+        }
       }
     }
+
+    // 启动多个 worker 并行执行
+    const workers = Array.from({ length: effectiveConcurrency }, () => worker())
+    await Promise.all(workers)
+
+    // 清理进度记录
+    for (const task of tasks) {
+      batchMergeProgress.delete(task.taskId)
+    }
+
+    return { success: true, data: results }
+  } finally {
+    isMerging = false
   }
-
-  // 启动多个 worker 并行执行
-  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker())
-  await Promise.all(workers)
-
-  // 清理进度记录
-  for (const task of tasks) {
-    batchMergeProgress.delete(task.taskId)
-  }
-
-  return { success: true, data: results }
 })
 
 // 11. 获取批量合并进度
@@ -638,10 +956,110 @@ ipcMain.handle('browser:minimize', (_event, prevHwnd: number) => {
   return { success: true }
 })
 
+// 16. 获取手机控制地址
+ipcMain.handle('control:getUrl', () => {
+  const url = getControlUrl()
+  return { success: true, data: url }
+})
+
+// 17. 获取本机局域网 IP
+ipcMain.handle('control:getIP', () => {
+  return { success: true, data: getLocalIP() }
+})
+
+// 18. 启动/停止控制服务器
+ipcMain.handle('control:toggle', async (_event, enabled: boolean, port?: number) => {
+  try {
+    if (enabled) {
+      const url = await startControlServer(port || 9820)
+      return { success: true, data: url }
+    } else {
+      stopControlServer()
+      return { success: true, data: '' }
+    }
+  } catch (e: unknown) {
+    return { success: false, message: String(e) }
+  }
+})
+
+// 18b. 获取局域网 IP 和端口（供桌面端显示）
+ipcMain.handle('network:getInfo', () => {
+  return { success: true, data: { ip: getLocalIP(), port: getControlPort() } }
+})
+
+// 19. 最小化到托盘（后台运行）
+ipcMain.handle('window:minimizeToTray', () => {
+  if (mainWindow) {
+    mainWindow.hide()
+    // 确保托盘图标存在
+    createTray()
+  }
+  return { success: true }
+})
+
+// 20. 从托盘恢复窗口
+ipcMain.handle('window:restoreFromTray', () => {
+  if (mainWindow) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  return { success: true }
+})
+
+// 21. 真正退出应用
+ipcMain.handle('app:forceQuit', () => {
+  forceQuit = true
+  app.quit()
+  return { success: true }
+})
+
+// 22. 获取已合并文件列表（投稿页使用，扫描输出文件夹）
+ipcMain.handle('mergedFiles:get', () => {
+  const config = loadConfig()
+  const outputFolder = config.outputFolder || ''
+  console.log('[mergedFiles:get] outputFolder:', outputFolder)
+  const files = mergedFiles.scanFolder(outputFolder)
+  console.log('[mergedFiles:get] 找到文件数:', files.length, files.map(f => f.name))
+  return { success: true, data: files }
+})
+
+// 23. 已移除：投稿列表现在是输出文件夹的实时扫描，不支持从列表移除
+// 24. 已移除：同上
+
+// 25. 获取网络信息（已由 18b 注册，不再重复）
+
+// 26. 投稿已合并的文件（注册文件 + 打开B站投稿页）
+ipcMain.handle('mergedFiles:upload', async (_event, filePaths: string[]) => {
+  if (!filePaths || filePaths.length === 0) {
+    return { success: false, message: '未指定文件' }
+  }
+  // 重置投稿完成状态
+  uploadDone = false
+  if (uploadDoneTimer) { clearTimeout(uploadDoneTimer); uploadDoneTimer = null }
+  const fileUrls: string[] = []
+  for (const fp of filePaths) {
+    const url = await registerFileForServe(fp)
+    fileUrls.push(url)
+  }
+  // 打开B站投稿页
+  let bilibiliUrl = 'https://member.bilibili.com/platform/upload/video/frame'
+  bilibiliUrl += '?autoFiles=' + fileUrls.map((u) => encodeURIComponent(u)).join(',')
+  shell.openExternal(bilibiliUrl)
+  return { success: true, data: { fileUrls } }
+})
+
 // 设置用户数据目录（开发模式用项目内目录，打包后用系统默认目录）
 if (is.dev) {
   app.setPath('userData', join(__dirname, '../../user-data'))
 }
+
+// 全局未捕获异常处理
+process.on('uncaughtException', (error) => {
+  console.error('[App] 未捕获的异常:', error)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[App] 未处理的 Promise 拒绝:', reason)
+})
 
 // 应用启动
 app.whenReady().then(() => {
@@ -656,15 +1074,78 @@ app.whenReady().then(() => {
 
   createWindow()
 
+  // 启动手机控制服务器
+  const config = loadConfig()
+  setConfigCallbacks(loadConfig, saveConfig)
+  setFileServerCallback(registerFileForServe)
+  setOpenExternalCallback((url: string) => { shell.openExternal(url) })
+  // 设置扫描回调：手机控制面板调用扫描时，使用与主 App 完全相同的扫描逻辑
+  setScanCallback(async (folderPath: string, maxIntervalHours: number) => {
+    const latestCfg = loadConfig()
+    const result = await performScan(folderPath, maxIntervalHours, latestCfg.outputFolder || '')
+    // 应用排除列表（hiddenFolderKeys），保持与 App 列表一致
+    const latestConfig = loadConfig()
+    const hiddenKeys = new Set(latestConfig.hiddenFolderKeys || [])
+    const filtered = result.folders.filter((f) => !hiddenKeys.has(f.key))
+    updateScanResults(filtered)
+    return filtered
+  })
+  // 设置排除列表更新回调（手机操作排除时同步到主 App）
+  setUpdateHiddenKeysCallback((keys: string[]) => {
+    saveConfig({ hiddenFolderKeys: keys })
+    // 通知渲染进程刷新
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('config:updated')
+    }
+  })
+  // 设置投稿完成状态查询回调（手机控制面板可获取投稿是否完成）
+  setUploadDoneCallback(() => uploadDone)
+  // 设置投稿完成状态重置回调（新一轮投稿开始时清除旧状态）
+  setResetUploadDoneCallback(() => {
+    uploadDone = false
+    if (uploadDoneTimer) { clearTimeout(uploadDoneTimer); uploadDoneTimer = null }
+  })
+  // 设置主 App 合并状态检查回调（防止手机端与桌面端同时合并）
+  setIsMainAppMergingCallback(() => isMerging)
+  setMergeLockCallbacks(getIsMerging, setIsMerging)
+  if (config.controlEnabled !== false) {
+    startControlServer(config.controlPort || 9820).catch((e) => {
+      console.error('[App] 控制服务器启动失败:', e)
+    })
+  }
+
+  // 启动配置文件监听（手机端修改配置时同步到电脑端）
+  startConfigWatcher()
+
+  // 后台运行模式：创建托盘图标
+  if (config.runInBackground) {
+    createTray()
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
+    } else if (mainWindow) {
+      // 从托盘恢复窗口
+      mainWindow.show()
+      mainWindow.focus()
     }
   })
 })
 
 app.on('window-all-closed', () => {
+  // 后台运行模式下不退出
+  const config = loadConfig()
+  if (config.runInBackground && !forceQuit) {
+    return
+  }
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  forceQuit = true
+  stopControlServer()
+  destroyTray()
 })

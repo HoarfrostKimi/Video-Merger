@@ -1,11 +1,41 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input, Switch, Drawer } from 'antd'
-import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled, EyeInvisibleOutlined, EyeOutlined, UndoOutlined, SettingOutlined } from '@ant-design/icons'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input, Modal, Badge } from 'antd'
+import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled, EyeInvisibleOutlined, EyeOutlined, UndoOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import dayjs from 'dayjs'
+import SettingsDrawer from './SettingsDrawer'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
+
+// ============ 工具函数（组件外部，避免每次渲染重建） ============
+
+// 格式化百分比：小于 1% 时显示一位小数，否则显示整数
+const formatPercent = (p: number) => {
+  if (p <= 0) return '0'
+  if (p < 1) return p.toFixed(1)
+  return p.toFixed(0)
+}
+
+// 格式化秒数为 mm:ss 或 hh:mm:ss
+const formatTime = (s: number) => {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = Math.floor(s % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
+
+const formatSize = (bytes: number): string => {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+// 从合并文件名提取简洁显示名：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
+const formatUploadName = (fileName: string) => {
+  const match = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/)
+  return match ? `${match[1]} ${match[2]}` : fileName.replace(/\.mp4$/i, '')
+}
 
 interface HomeProps {
   darkMode: boolean
@@ -34,16 +64,19 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [pluginLinkage, setPluginLinkage] = useState(false)
   const [autoCloseBrowser, setAutoCloseBrowser] = useState(false)
   const [autoCloseApp, setAutoCloseApp] = useState(true)
+  const [runInBackground, setRunInBackground] = useState(false)
+  const [controlEnabled, setControlEnabled] = useState(true)
+  const [controlPort, setControlPort] = useState(9820)
+  const [controlPassword, setControlPassword] = useState('')
+  const [controlUrl, setControlUrl] = useState('')
   const [showSettings, setShowSettings] = useState(false)
-  // 设置面板的临时值（未保存时不影响实际值）
-  const [draftMaxInterval, setDraftMaxInterval] = useState(2.5)
-  const [draftConcurrency, setDraftConcurrency] = useState(3)
-  const [draftAutoOpenFolder, setDraftAutoOpenFolder] = useState(true)
-  const [draftAutoOpenWebsite, setDraftAutoOpenWebsite] = useState(true)
-  const [draftPluginLinkage, setDraftPluginLinkage] = useState(false)
-  const [draftAutoCloseBrowser, setDraftAutoCloseBrowser] = useState(false)
-  const [draftAutoCloseApp, setDraftAutoCloseApp] = useState(true)
+  // 投稿弹窗状态
+  const [mergedFiles, setMergedFiles] = useState<Array<{ index: number; name: string; path: string; mtime: number }>>([])
+  const [showUploadModal, setShowUploadModal] = useState(false)
+  const [uploadSelectedKeys, setUploadSelectedKeys] = useState<React.Key[]>([])
+  const [uploading, setUploading] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pluginPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const websiteOpenedRef = useRef(false)
   const folderOpenedRef = useRef(false)
 
@@ -52,6 +85,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     ;(async () => {
       // 第一步：加载配置
       let loadedInputFolder = ''
+      let loadedOutputFolder = ''
       let loadedHiddenKeys: string[] = []
       try {
         const config = await window.api.loadConfig()
@@ -60,6 +94,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           setInputFolder(config.inputFolder)
         }
         if (config.outputFolder) {
+          loadedOutputFolder = config.outputFolder
           setOutputFolder(config.outputFolder)
         }
         if (config.maxIntervalHours !== undefined) {
@@ -83,6 +118,18 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         if (config.autoCloseApp !== undefined) {
           setAutoCloseApp(config.autoCloseApp)
         }
+        if (config.runInBackground !== undefined) {
+          setRunInBackground(config.runInBackground)
+        }
+        if (config.controlEnabled !== undefined) {
+          setControlEnabled(config.controlEnabled)
+        }
+        if (config.controlPort !== undefined) {
+          setControlPort(config.controlPort)
+        }
+        if (config.controlPassword !== undefined) {
+          setControlPassword(config.controlPassword)
+        }
         if (config.hiddenFolderKeys && Array.isArray(config.hiddenFolderKeys)) {
           loadedHiddenKeys = config.hiddenFolderKeys
           setHiddenFolderKeys(config.hiddenFolderKeys)
@@ -91,11 +138,27 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         console.warn('加载配置失败:', err)
       }
 
+      // 获取手机控制地址
+      try {
+        const url = await window.api.getControlUrl()
+        setControlUrl(url)
+      } catch {
+        // ignore
+      }
+
+      // 加载已合并文件列表（投稿页使用）
+      try {
+        const list = await window.api.getMergedFiles()
+        setMergedFiles(list)
+      } catch {
+        // ignore
+      }
+
       // 第二步：配置加载完成后，立即自动扫描（使用刚加载的排除列表）
       if (loadedInputFolder) {
         try {
           setScanning(true)
-          const result: ScanResult = await window.api.scanFlvFiles(loadedInputFolder, 2.5)
+          const result: ScanResult = await window.api.scanFlvFiles(loadedInputFolder, 2.5, loadedOutputFolder)
           const hiddenSet = new Set(loadedHiddenKeys)
           const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
           const hidden = result.folders.filter((f) => hiddenSet.has(f.key))
@@ -114,6 +177,23 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         }
       }
     })()
+  }, [])
+
+  // 监听配置变更（手机端操作后同步）
+  useEffect(() => {
+    if (!window.api) return
+    const unsubscribe = window.api.onConfigUpdated(async () => {
+      console.log('[Home] 收到配置变更通知，重新加载配置')
+      try {
+        const config = await window.api!.loadConfig()
+        if (config.hiddenFolderKeys && Array.isArray(config.hiddenFolderKeys)) {
+          setHiddenFolderKeys(config.hiddenFolderKeys)
+        }
+      } catch (err) {
+        console.warn('重新加载配置失败:', err)
+      }
+    })
+    return unsubscribe
   }, [])
 
   const genMergeFileName = useCallback((folder: FolderGroup) => {
@@ -161,7 +241,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     }
     setScanning(true)
     try {
-      const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours)
+      const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours, outputFolder || undefined)
       const hiddenSet = new Set(hiddenFolderKeys)
       const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
       // 保存被排除的完整对象用于显示
@@ -177,23 +257,18 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     } finally {
       setScanning(false)
     }
-  }, [inputFolder, hiddenFolderKeys])
+  }, [inputFolder, hiddenFolderKeys, maxIntervalHours, outputFolder])
 
-  // 格式化百分比：小于 1% 时显示一位小数，否则显示整数
-  const formatPercent = (p: number) => {
-    if (p <= 0) return '0'
-    if (p < 1) return p.toFixed(1)
-    return p.toFixed(0)
-  }
-
-  // 格式化秒数为 mm:ss 或 hh:mm:ss
-  const formatTime = (s: number) => {
-    const h = Math.floor(s / 3600)
-    const m = Math.floor((s % 3600) / 60)
-    const sec = Math.floor(s % 60)
-    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-    return `${m}:${String(sec).padStart(2, '0')}`
-  }
+  // 加载已合并文件列表（投稿用）
+  const loadMergedFiles = useCallback(async () => {
+    if (!window.api) return
+    try {
+      const list = await window.api.getMergedFiles()
+      setMergedFiles(list)
+    } catch {
+      // ignore
+    }
+  }, [])
 
   const handleMerge = useCallback(async () => {
     if (!window.api) return
@@ -210,11 +285,6 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     setProgress(0)
     setElapsedSeconds(0)
     setBatchProgress({})
-
-    // 启动计时器，每秒更新已用时间
-    timerRef.current = setInterval(() => {
-      setElapsedSeconds((prev) => prev + 1)
-    }, 1000)
 
     // 准备批量合并任务
     const tasks = selectedRowKeys.map((key) => {
@@ -233,12 +303,12 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       }
     })
 
-    // 启动进度轮询，每 500ms 从主进程获取批量进度
-    const pollInterval = setInterval(async () => {
+    // 启动统一轮询（1秒间隔）：同时更新进度和已用时间
+    timerRef.current = setInterval(async () => {
+      setElapsedSeconds((prev) => prev + 1)
       try {
         const progress = await window.api!.getBatchProgress()
         setBatchProgress(progress)
-
         // 计算总体进度
         const values = Object.values(progress)
         if (values.length > 0) {
@@ -248,7 +318,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       } catch (err) {
         console.warn('批量进度轮询失败:', err)
       }
-    }, 500)
+    }, 1000)
 
     try {
       setStatusText(`正在并行合并 ${tasks.length} 个分组（并发数: ${concurrency}）`)
@@ -276,10 +346,13 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
 
       // 移除成功的分组
       setFolders((prev) => prev.filter((f) => !successKeys.includes(f.key)))
-      setSelectedRowKeys((prev) => prev.filter((k) => !successKeys.includes(k)))
+      setSelectedRowKeys((prev) => prev.filter((k) => !successKeys.includes(k as string)))
 
       setProgress(100)
       setStatusText('')
+
+      // 刷新已合并文件列表（更新投稿角标）
+      loadMergedFiles()
 
       // 合并完成后自动打开输出文件夹和B站投稿页面（仅首次）
       if (successCount > 0 && window.api && outputFolder) {
@@ -327,12 +400,15 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
             if (pluginLinkage && fileUrls.length > 0) {
               let pollCount = 0
               const maxPoll = 600 // 最多等10分钟
-              const pollTimer = setInterval(async () => {
+              // 清理之前的插件轮询定时器（如果有）
+              if (pluginPollTimerRef.current) clearInterval(pluginPollTimerRef.current)
+              pluginPollTimerRef.current = setInterval(async () => {
                 pollCount++
                 try {
                   const done = await window.api.checkUploadDone()
                   if (done) {
-                    clearInterval(pollTimer)
+                    if (pluginPollTimerRef.current) clearInterval(pluginPollTimerRef.current)
+                    pluginPollTimerRef.current = null
                     console.log('[App] 插件投稿完成')
                     // 根据设置决定是否关闭 App
                     if (autoCloseApp) {
@@ -346,7 +422,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                   // ignore
                 }
                 if (pollCount >= maxPoll) {
-                  clearInterval(pollTimer)
+                  if (pluginPollTimerRef.current) clearInterval(pluginPollTimerRef.current)
+                  pluginPollTimerRef.current = null
                 }
               }, 1000)
             }
@@ -364,11 +441,11 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     } catch (err: any) {
       message.error(`批量合并失败: ${err.message}`)
     } finally {
-      clearInterval(pollInterval)
       if (timerRef.current) clearInterval(timerRef.current)
+      if (pluginPollTimerRef.current) clearInterval(pluginPollTimerRef.current)
       setProcessing(false)
     }
-  }, [selectedRowKeys, folders, outputFolder, genMergeFileName, concurrency])
+  }, [selectedRowKeys, folders, outputFolder, genMergeFileName, concurrency, loadMergedFiles])
 
   const handleOpenDirectory = useCallback(async () => {
     if (!window.api) return
@@ -422,17 +499,11 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     message.success(`已恢复全部 ${hiddenFolders.length} 个分组`)
   }, [hiddenFolders])
 
-  const formatSize = (bytes: number): string => {
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-  }
-
   const handleRowClick = (record: FolderGroup) => {
     setSelectedFolder(record)
   }
 
-  const columns: ColumnsType<FolderGroup> = [
+  const columns = useMemo<ColumnsType<FolderGroup>>(() => [
     {
       title: '日期',
       dataIndex: 'date',
@@ -481,7 +552,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         return <Text type="secondary">{genMergeFileName(record)}.mp4</Text>
       }
     }
-  ]
+  ], [genMergeFileName])
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -499,19 +570,21 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         </Title>
         <Tag color="green" style={{ marginLeft: 16 }}>FFmpeg 就绪</Tag>
         <div style={{ flex: 1 }} />
+        <Badge count={mergedFiles.length} size="small">
+          <Button
+            icon={<UploadOutlined />}
+            onClick={() => {
+              loadMergedFiles()
+              setShowUploadModal(true)
+            }}
+            title="待投稿文件"
+          >
+            投稿
+          </Button>
+        </Badge>
         <Button
           icon={<SettingOutlined />}
-          onClick={() => {
-            // 打开设置面板时，用当前值初始化临时值
-            setDraftMaxInterval(maxIntervalHours)
-            setDraftConcurrency(concurrency)
-            setDraftAutoOpenFolder(autoOpenFolder)
-            setDraftAutoOpenWebsite(autoOpenWebsite)
-            setDraftPluginLinkage(pluginLinkage)
-            setDraftAutoCloseBrowser(autoCloseBrowser)
-            setDraftAutoCloseApp(autoCloseApp)
-            setShowSettings(true)
-          }}
+          onClick={() => setShowSettings(true)}
           title="设置"
         />
         <Button
@@ -614,7 +687,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                   <div style={{ marginTop: 8 }}>
                     {selectedFolder.files.map((file, index) => (
                       <div key={file.path} style={{ padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
-                        <Text type="primary">{index + 1}.</Text>
+                        <Text>{index + 1}.</Text>
                         <Text style={{ marginLeft: 8 }}>{file.name}</Text>
                         <Text type="secondary" style={{ marginLeft: 12 }}>({formatSize(file.size)})</Text>
                       </div>
@@ -699,9 +772,10 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                   {Object.keys(batchProgress).length > 0 && (
                     <div style={{ marginTop: 12 }}>
                       {selectedRowKeys.map((key) => {
-                        const folder = folders.find((f) => f.key === key)
+                        const keyStr = String(key)
+                        const folder = folders.find((f) => f.key === keyStr)
                         if (!folder) return null
-                        const taskProgress = batchProgress[key]
+                        const taskProgress = batchProgress[keyStr]
                         if (taskProgress === undefined) return null
 
                         const status = taskProgress === 100 ? 'success' : taskProgress === -1 ? 'exception' : 'active'
@@ -740,131 +814,153 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       </Content>
 
       {/* 设置面板 */}
-      <Drawer
-        title="设置"
-        open={showSettings}
+      <SettingsDrawer
+        visible={showSettings}
         onClose={() => setShowSettings(false)}
-        width={420}
+        config={{
+          maxIntervalHours,
+          concurrency,
+          autoOpenFolder,
+          autoOpenWebsite,
+          pluginLinkage,
+          autoCloseBrowser,
+          autoCloseApp,
+          runInBackground,
+          controlEnabled,
+          controlPort,
+          controlPassword
+        }}
+        onSave={(newConfig) => {
+          if (newConfig.maxIntervalHours !== undefined) setMaxIntervalHours(newConfig.maxIntervalHours)
+          if (newConfig.concurrency !== undefined) setConcurrency(newConfig.concurrency)
+          if (newConfig.autoOpenFolder !== undefined) setAutoOpenFolder(newConfig.autoOpenFolder)
+          if (newConfig.autoOpenWebsite !== undefined) setAutoOpenWebsite(newConfig.autoOpenWebsite)
+          if (newConfig.pluginLinkage !== undefined) setPluginLinkage(newConfig.pluginLinkage)
+          if (newConfig.autoCloseBrowser !== undefined) setAutoCloseBrowser(newConfig.autoCloseBrowser)
+          if (newConfig.autoCloseApp !== undefined) setAutoCloseApp(newConfig.autoCloseApp)
+          if (newConfig.runInBackground !== undefined) setRunInBackground(newConfig.runInBackground)
+          if (newConfig.controlEnabled !== undefined) setControlEnabled(newConfig.controlEnabled)
+          if (newConfig.controlPort !== undefined) setControlPort(newConfig.controlPort)
+          if (newConfig.controlPassword !== undefined) setControlPassword(newConfig.controlPassword)
+          if (window.api) {
+            window.api.saveConfig(newConfig)
+            // 刷新控制地址
+            window.api.getControlUrl().then((url) => setControlUrl(url)).catch(() => {})
+          }
+        }}
+        darkMode={darkMode}
+      />
+
+      {/* 投稿弹窗 */}
+      <Modal
+        title={
+          <Space>
+            <UploadOutlined />
+            <span>待投稿文件</span>
+            <Tag color="blue">{mergedFiles.length} 个文件</Tag>
+          </Space>
+        }
+        open={showUploadModal}
+        onCancel={() => setShowUploadModal(false)}
+        width={700}
         footer={
-          <div style={{ textAlign: 'right' }}>
-            <Button
-              type="primary"
-              onClick={() => {
-                setMaxIntervalHours(draftMaxInterval)
-                setConcurrency(draftConcurrency)
-                setAutoOpenFolder(draftAutoOpenFolder)
-                setAutoOpenWebsite(draftAutoOpenWebsite)
-                setPluginLinkage(draftPluginLinkage)
-                setAutoCloseBrowser(draftAutoCloseBrowser)
-                setAutoCloseApp(draftAutoCloseApp)
-                if (window.api) {
-                  window.api.saveConfig({
-                    maxIntervalHours: draftMaxInterval,
-                    concurrency: draftConcurrency,
-                    autoOpenFolder: draftAutoOpenFolder,
-                    autoOpenWebsite: draftAutoOpenWebsite,
-                    pluginLinkage: draftPluginLinkage,
-                    autoCloseBrowser: draftAutoCloseBrowser,
-                    autoCloseApp: draftAutoCloseApp
-                  })
-                }
-                setShowSettings(false)
-                message.success('设置已保存')
-              }}
-            >
-              保存
-            </Button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Space>
+              <Button
+                size="small"
+                onClick={() => setUploadSelectedKeys(mergedFiles.map((f) => f.index))}
+              >
+                全选
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setUploadSelectedKeys([])}
+              >
+                取消全选
+              </Button>
+            </Space>
+            <Space>
+              <Button onClick={() => setShowUploadModal(false)}>关闭</Button>
+              <Button
+                type="primary"
+                icon={<UploadOutlined />}
+                loading={uploading}
+                disabled={uploadSelectedKeys.length === 0}
+                onClick={async () => {
+                  if (!window.api || uploadSelectedKeys.length === 0) return
+                  setUploading(true)
+                  try {
+                    const selectedPaths = mergedFiles
+                      .filter((f) => uploadSelectedKeys.includes(f.index))
+                      .map((f) => f.path)
+                    await window.api.uploadMergedFiles(selectedPaths)
+                    message.success('已打开B站投稿页面')
+                    // 刷新列表
+                    const list = await window.api.getMergedFiles()
+                    setMergedFiles(list)
+                    setUploadSelectedKeys([])
+                    setShowUploadModal(false)
+                  } catch (err: any) {
+                    message.error(err.message || '投稿失败')
+                  } finally {
+                    setUploading(false)
+                  }
+                }}
+              >
+                投稿选中文件
+              </Button>
+            </Space>
           </div>
         }
       >
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          {/* 第一排：两个数字输入 */}
-          <Space wrap style={{ width: '100%' }}>
-            <Space direction="vertical" size={2}>
-              <Space>
-                <Text>同场直播判定间隔:</Text>
-                <Input
-                  type="number"
-                  value={draftMaxInterval}
-                  onChange={(e) => setDraftMaxInterval(Number(e.target.value) || 2.5)}
-                  style={{ width: 80 }}
-                  min={0.5}
-                  max={12}
-                  step={0.5}
-                />
-                <Text>小时</Text>
-              </Space>
-              <Text type="secondary">（超过此间隔视为不同场直播）</Text>
-            </Space>
-            <Space direction="vertical" size={2}>
-              <Space>
-                <Text>并行合并数:</Text>
-                <Input
-                  type="number"
-                  value={draftConcurrency}
-                  onChange={(e) => setDraftConcurrency(Number(e.target.value) || 3)}
-                  style={{ width: 80 }}
-                  min={1}
-                  max={8}
-                  step={1}
-                />
-                <Text>个</Text>
-              </Space>
-              <Text type="secondary">（同时合并的分组数量，建议2-4）</Text>
-            </Space>
-          </Space>
-          <Space wrap style={{ width: '100%' }}>
-            <Text>合并完成后自动打开输出文件夹:</Text>
-            <Switch
-              checked={draftAutoOpenFolder}
-              onChange={(checked) => setDraftAutoOpenFolder(checked)}
-              checkedChildren="开"
-              unCheckedChildren="关"
-            />
-            <Text type="secondary">（仅首次合并后打开）</Text>
-          </Space>
-          <Space wrap style={{ width: '100%' }}>
-            <Text>合并完成后自动打开B站投稿页面:</Text>
-            <Switch
-              checked={draftAutoOpenWebsite}
-              onChange={(checked) => setDraftAutoOpenWebsite(checked)}
-              checkedChildren="开"
-              unCheckedChildren="关"
-            />
-            <Text type="secondary">（仅首次合并后打开）</Text>
-          </Space>
-          <Space wrap style={{ width: '100%' }}>
-            <Text>B站插件联动（自动上传+投稿）:</Text>
-            <Switch
-              checked={draftPluginLinkage}
-              onChange={(checked) => setDraftPluginLinkage(checked)}
-              checkedChildren="开"
-              unCheckedChildren="关"
-            />
-            <Text type="secondary">（开启后自动传递视频给插件）</Text>
-          </Space>
-          <Space wrap style={{ width: '100%' }}>
-            <Text>打开B站页面后最小化浏览器:</Text>
-            <Switch
-              checked={draftAutoCloseBrowser}
-              onChange={(checked) => setDraftAutoCloseBrowser(checked)}
-              checkedChildren="开"
-              unCheckedChildren="关"
-            />
-            <Text type="secondary">（打开投稿页后自动最小化浏览器，不影响其他窗口）</Text>
-          </Space>
-          <Space wrap style={{ width: '100%' }}>
-            <Text>投稿完成后关闭 App:</Text>
-            <Switch
-              checked={draftAutoCloseApp}
-              onChange={(checked) => setDraftAutoCloseApp(checked)}
-              checkedChildren="开"
-              unCheckedChildren="关"
-            />
-            <Text type="secondary">（投稿完成后自动退出视频合并工具）</Text>
-          </Space>
-        </Space>
-      </Drawer>
+        <Table
+          dataSource={mergedFiles}
+          rowKey="index"
+          size="small"
+          pagination={false}
+          scroll={{ y: 400 }}
+          rowSelection={{
+            selectedRowKeys: uploadSelectedKeys,
+            onChange: (keys) => setUploadSelectedKeys(keys)
+          }}
+          columns={[
+            {
+              title: '#',
+              key: 'no',
+              width: 50,
+              align: 'center',
+              render: (_: unknown, __: unknown, index: number) => index + 1
+            },
+            {
+              title: '文件名',
+              dataIndex: 'name',
+              key: 'name',
+              ellipsis: true,
+              render: (name: string) => <Text>{formatUploadName(name)}</Text>
+            },
+            {
+              title: '修改时间',
+              dataIndex: 'mtime',
+              key: 'mtime',
+              width: 150,
+              align: 'center',
+              render: (mtime: number) => {
+                const d = new Date(mtime)
+                const pad = (n: number) => String(n).padStart(2, '0')
+                return <Text type="secondary">{d.getFullYear()}-{pad(d.getMonth() + 1)}-{pad(d.getDate())} {pad(d.getHours())}:{pad(d.getMinutes())}</Text>
+              }
+            },
+            {
+              title: '路径',
+              dataIndex: 'path',
+              key: 'path',
+              ellipsis: true,
+              render: (path: string) => <Text type="secondary" style={{ fontSize: 12 }}>{path}</Text>
+            }
+          ]}
+          locale={{ emptyText: '暂无已合并文件，请先合并视频' }}
+        />
+      </Modal>
     </Layout>
   )
 }
