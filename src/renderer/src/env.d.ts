@@ -43,6 +43,8 @@ interface AppConfig {
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
   pluginLinkage?: boolean
+  autoCloseBrowser?: boolean
+  autoCloseApp?: boolean
   hiddenFolderKeys?: string[]
 }
 

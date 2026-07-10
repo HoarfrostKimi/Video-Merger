@@ -137,6 +137,8 @@ interface AppConfig {
   maxIntervalHours?: number
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
+  autoCloseBrowser?: boolean
+  autoCloseApp?: boolean
   hiddenFolderKeys?: string[]
 }
 

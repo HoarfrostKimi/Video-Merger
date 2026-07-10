@@ -239,48 +239,48 @@
 
   /**
    * Step 4: 设置可见范围为「仅自己可见」
-   * 可见范围是 radio 按钮组：公开可见 / 仅自己可见
+   * 可见范围是自定义 check-radio-v2 组件，非原生 radio 也非 el-select
    */
   async function stepSetVisibility(onLog) {
     onLog('设置可见范围...')
 
-    // 查找所有 radio 按钮，找到「仅自己可见」对应的那个
-    const radios = document.querySelectorAll('input[type="radio"]')
-    for (const radio of radios) {
-      // 向上查找包含「仅自己可见」文字的父元素
-      let parent = radio.parentElement
-      let found = false
-      while (parent && parent !== document.body) {
-        if (parent.textContent.includes('仅自己可见')) {
-          found = true
-          break
+    // 查找包含「仅自己可见」文本的 check-radio-v2-container
+    const nameSpans = document.querySelectorAll('.check-radio-v2-name')
+    for (const span of nameSpans) {
+      if (span.textContent.trim() === '仅自己可见') {
+        const container = span.closest('.check-radio-v2-container')
+        if (container) {
+          // 检查是否已选中（容器可能有 active/checked 类名）
+          if (container.classList.contains('active') || container.classList.contains('checked') || container.querySelector('.check-radio-v2-box')?.classList.contains('checked')) {
+            onLog('可见范围已是「仅自己可见」')
+          } else {
+            container.click()
+            onLog('可见范围已设置为「仅自己可见」')
+          }
+          await sleep(500)
+          return
         }
-        parent = parent.parentElement
       }
-      if (!found) continue
+    }
 
-      if (radio.checked) {
-        onLog('可见范围已是「仅自己可见」')
-        await sleep(500)
-        return
+    // 备用方案：通过文本内容查找
+    onLog('提示: 未通过 class 定位，尝试备用方案...')
+    const allEls = document.querySelectorAll('div, span, label')
+    for (const el of allEls) {
+      const directText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === 3)
+        .map(n => n.textContent)
+        .join('')
+        .trim()
+      if (directText === '仅自己可见') {
+        const clickable = el.closest('.check-radio-v2-container') || el.parentElement
+        if (clickable) {
+          clickable.click()
+          onLog('可见范围已设置（备用方案）')
+          await sleep(500)
+          return
+        }
       }
-
-      // 点击 radio 的父级 label 或容器（比直接点 radio 更可靠）
-      const label = radio.closest('label') || radio.parentElement
-      if (label && label.tagName.toLowerCase() === 'label') {
-        label.click()
-      } else {
-        // 用 MouseEvent 点击 radio 本身
-        const rect = radio.getBoundingClientRect()
-        radio.dispatchEvent(new MouseEvent('click', {
-          bubbles: true, cancelable: true, view: window,
-          clientX: rect.left + rect.width / 2,
-          clientY: rect.top + rect.height / 2
-        }))
-      }
-      onLog('可见范围已设置为「仅自己可见」')
-      await sleep(500)
-      return
     }
 
     onLog('提示: 未找到可见范围控件，请手动设置')

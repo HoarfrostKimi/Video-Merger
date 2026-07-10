@@ -32,6 +32,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [autoOpenWebsite, setAutoOpenWebsite] = useState(true)
   const [autoOpenFolder, setAutoOpenFolder] = useState(true)
   const [pluginLinkage, setPluginLinkage] = useState(false)
+  const [autoCloseBrowser, setAutoCloseBrowser] = useState(false)
+  const [autoCloseApp, setAutoCloseApp] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   // 设置面板的临时值（未保存时不影响实际值）
   const [draftMaxInterval, setDraftMaxInterval] = useState(2.5)
@@ -39,6 +41,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [draftAutoOpenFolder, setDraftAutoOpenFolder] = useState(true)
   const [draftAutoOpenWebsite, setDraftAutoOpenWebsite] = useState(true)
   const [draftPluginLinkage, setDraftPluginLinkage] = useState(false)
+  const [draftAutoCloseBrowser, setDraftAutoCloseBrowser] = useState(false)
+  const [draftAutoCloseApp, setDraftAutoCloseApp] = useState(true)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const websiteOpenedRef = useRef(false)
   const folderOpenedRef = useRef(false)
@@ -72,6 +76,12 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         }
         if (config.pluginLinkage !== undefined) {
           setPluginLinkage(config.pluginLinkage)
+        }
+        if (config.autoCloseBrowser !== undefined) {
+          setAutoCloseBrowser(config.autoCloseBrowser)
+        }
+        if (config.autoCloseApp !== undefined) {
+          setAutoCloseApp(config.autoCloseApp)
         }
         if (config.hiddenFolderKeys && Array.isArray(config.hiddenFolderKeys)) {
           loadedHiddenKeys = config.hiddenFolderKeys
@@ -299,21 +309,21 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               bilibiliUrl += '?autoFiles=' + fileUrls.map(u => encodeURIComponent(u)).join(',')
             }
 
-            // 插件联动时，先记住当前前台窗口，打开浏览器后判断是否需要最小化
+            // 插件联动且开启最小化设置时，先记住当前前台窗口
             let prevHwnd = 0
-            if (pluginLinkage && fileUrls.length > 0) {
+            if (pluginLinkage && fileUrls.length > 0 && autoCloseBrowser) {
               prevHwnd = await window.api.getForegroundWindow()
             }
 
             await window.api.openExternal(bilibiliUrl)
             websiteOpenedRef.current = true
 
-            // 插件联动时，仅当浏览器抢了焦点才最小化它
-            if (pluginLinkage && fileUrls.length > 0) {
+            // 插件联动且开启最小化设置时，仅当浏览器抢了焦点才最小化它
+            if (pluginLinkage && fileUrls.length > 0 && autoCloseBrowser) {
               window.api.minimizeBrowser(prevHwnd)
             }
 
-            // 插件联动开启时，轮询等待插件完成投稿，然后自动关闭 app
+            // 插件联动开启时，轮询等待插件完成投稿，然后根据设置关闭
             if (pluginLinkage && fileUrls.length > 0) {
               let pollCount = 0
               const maxPoll = 600 // 最多等10分钟
@@ -323,13 +333,14 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                   const done = await window.api.checkUploadDone()
                   if (done) {
                     clearInterval(pollTimer)
-                    console.log('[App] 插件投稿完成，自动关闭')
-                    // 关闭文件夹窗口
-                    if (folderOpenedRef.current && outputFolder) {
-                      // 文件夹窗口无法通过 API 关闭，提示用户
+                    console.log('[App] 插件投稿完成')
+                    // 根据设置决定是否关闭 App
+                    if (autoCloseApp) {
+                      console.log('[App] 自动关闭 App')
+                      window.close()
+                    } else {
+                      console.log('[App] 不自动关闭 App')
                     }
-                    // 关闭 app
-                    window.close()
                   }
                 } catch {
                   // ignore
@@ -497,6 +508,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
             setDraftAutoOpenFolder(autoOpenFolder)
             setDraftAutoOpenWebsite(autoOpenWebsite)
             setDraftPluginLinkage(pluginLinkage)
+            setDraftAutoCloseBrowser(autoCloseBrowser)
+            setDraftAutoCloseApp(autoCloseApp)
             setShowSettings(true)
           }}
           title="设置"
@@ -742,13 +755,17 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                 setAutoOpenFolder(draftAutoOpenFolder)
                 setAutoOpenWebsite(draftAutoOpenWebsite)
                 setPluginLinkage(draftPluginLinkage)
+                setAutoCloseBrowser(draftAutoCloseBrowser)
+                setAutoCloseApp(draftAutoCloseApp)
                 if (window.api) {
                   window.api.saveConfig({
                     maxIntervalHours: draftMaxInterval,
                     concurrency: draftConcurrency,
                     autoOpenFolder: draftAutoOpenFolder,
                     autoOpenWebsite: draftAutoOpenWebsite,
-                    pluginLinkage: draftPluginLinkage
+                    pluginLinkage: draftPluginLinkage,
+                    autoCloseBrowser: draftAutoCloseBrowser,
+                    autoCloseApp: draftAutoCloseApp
                   })
                 }
                 setShowSettings(false)
@@ -824,7 +841,27 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               checkedChildren="开"
               unCheckedChildren="关"
             />
-            <Text type="secondary">（开启后自动传递视频给插件，投稿完成后自动关闭 app）</Text>
+            <Text type="secondary">（开启后自动传递视频给插件）</Text>
+          </Space>
+          <Space wrap style={{ width: '100%' }}>
+            <Text>打开B站页面后最小化浏览器:</Text>
+            <Switch
+              checked={draftAutoCloseBrowser}
+              onChange={(checked) => setDraftAutoCloseBrowser(checked)}
+              checkedChildren="开"
+              unCheckedChildren="关"
+            />
+            <Text type="secondary">（打开投稿页后自动最小化浏览器，不影响其他窗口）</Text>
+          </Space>
+          <Space wrap style={{ width: '100%' }}>
+            <Text>投稿完成后关闭 App:</Text>
+            <Switch
+              checked={draftAutoCloseApp}
+              onChange={(checked) => setDraftAutoCloseApp(checked)}
+              checkedChildren="开"
+              unCheckedChildren="关"
+            />
+            <Text type="secondary">（投稿完成后自动退出视频合并工具）</Text>
           </Space>
         </Space>
       </Drawer>
