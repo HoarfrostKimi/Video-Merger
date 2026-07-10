@@ -298,8 +298,20 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
             if (fileUrls.length > 0) {
               bilibiliUrl += '?autoFiles=' + fileUrls.map(u => encodeURIComponent(u)).join(',')
             }
+
+            // 插件联动时，先记住当前前台窗口，打开浏览器后判断是否需要最小化
+            let prevHwnd = 0
+            if (pluginLinkage && fileUrls.length > 0) {
+              prevHwnd = await window.api.getForegroundWindow()
+            }
+
             await window.api.openExternal(bilibiliUrl)
             websiteOpenedRef.current = true
+
+            // 插件联动时，仅当浏览器抢了焦点才最小化它
+            if (pluginLinkage && fileUrls.length > 0) {
+              window.api.minimizeBrowser(prevHwnd)
+            }
 
             // 插件联动开启时，轮询等待插件完成投稿，然后自动关闭 app
             if (pluginLinkage && fileUrls.length > 0) {

@@ -50,6 +50,10 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => invokeApi('scan
   // 本地文件服务器（给 Chrome 插件提供视频文件）
   registerFileForServe: (filePath: string) => invokeApi('fileServer:register', filePath),
   checkUploadDone: () => invokeApi('fileServer:checkDone'),
+
+  // 最小化外部浏览器窗口
+  getForegroundWindow: () => invokeApi('browser:getForegroundWindow'),
+  minimizeBrowser: (prevHwnd: number) => invokeApi('browser:minimize', prevHwnd),
 }
 
 if (process.contextIsolated) {

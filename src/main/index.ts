@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
 import { join, relative, dirname, extname, basename } from 'path'
 import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, createReadStream } from 'fs'
 import { createServer, Server } from 'http'
+import { execFile } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { createHash } from 'crypto'
 import { getVideoInfo, convertToMp4, mergeVideos } from './ffmpeg'
@@ -81,6 +82,48 @@ async function registerFileForServe(filePath: string): Promise<string> {
   servedFiles.set(fileId, filePath)
   const fileName = basename(filePath)
   return `http://127.0.0.1:${port}/?fileId=${fileId}&name=${encodeURIComponent(fileName)}`
+}
+
+/** 获取当前前台窗口句柄（Windows） */
+function getForegroundWindow(): Promise<number> {
+  if (process.platform !== 'win32') return Promise.resolve(0)
+  return new Promise((resolve) => {
+    const ps = `Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+"@
+Write-Output ([Win32]::GetForegroundWindow().ToInt64())`
+    execFile('powershell.exe', ['-NoProfile', '-Command', ps], { windowsHide: true }, (err, stdout) => {
+      if (err) return resolve(0)
+      resolve(parseInt(stdout.trim(), 10) || 0)
+    })
+  })
+}
+
+/** 最小化外部浏览器窗口（仅当它抢了焦点时才最小化） */
+function minimizeBrowser(prevHwnd: number): void {
+  if (process.platform !== 'win32') return
+  const ps = `
+try {
+  Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+  Start-Sleep -Seconds 2
+  $currentHwnd = [Win32]::GetForegroundWindow().ToInt64()
+  if ($currentHwnd -ne ${prevHwnd} -and $currentHwnd -ne 0) {
+    [Win32]::ShowWindow([IntPtr]$currentHwnd, 6) | Out-Null
+  }
+} catch {}
+`
+  execFile('powershell.exe', ['-NoProfile', '-Command', ps], { windowsHide: true }, () => {})
 }
 
 // ============ 配置管理：记住用户设置 ============
@@ -580,6 +623,17 @@ ipcMain.handle('fileServer:register', async (_event, filePath: string) => {
 // 13. 检查插件是否已完成投稿
 ipcMain.handle('fileServer:checkDone', () => {
   return uploadDone
+})
+
+// 14. 获取当前前台窗口句柄（用于判断浏览器是否抢了焦点）
+ipcMain.handle('browser:getForegroundWindow', async () => {
+  return await getForegroundWindow()
+})
+
+// 15. 最小化外部浏览器窗口（仅当它抢了焦点时才最小化）
+ipcMain.handle('browser:minimize', (_event, prevHwnd: number) => {
+  minimizeBrowser(prevHwnd)
+  return { success: true }
 })
 
 // 设置用户数据目录（开发模式用项目内目录，打包后用系统默认目录）

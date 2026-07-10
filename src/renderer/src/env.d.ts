@@ -27,6 +27,9 @@ interface Window {
     // 本地文件服务器（给 Chrome 插件提供视频文件）
     registerFileForServe: (filePath: string) => Promise<string>
     checkUploadDone: () => Promise<boolean>
+    // 最小化外部浏览器窗口
+    getForegroundWindow: () => Promise<number>
+    minimizeBrowser: (prevHwnd: number) => Promise<void>
   }
 }
 
