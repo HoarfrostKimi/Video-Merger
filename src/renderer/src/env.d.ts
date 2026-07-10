@@ -24,6 +24,9 @@ interface Window {
     // 进度（轮询获取）
     getProgress: () => Promise<{ mergeProgress: number; convertProgress: number }>
     getBatchProgress: () => Promise<Record<string, number>>
+    // 本地文件服务器（给 Chrome 插件提供视频文件）
+    registerFileForServe: (filePath: string) => Promise<string>
+    checkUploadDone: () => Promise<boolean>
   }
 }
 
@@ -36,6 +39,7 @@ interface AppConfig {
   maxIntervalHours?: number
   autoOpenWebsite?: boolean
   autoOpenFolder?: boolean
+  pluginLinkage?: boolean
   hiddenFolderKeys?: string[]
 }
 

@@ -1,0 +1,141 @@
+/* content.css - B站投稿助手面板样式 */
+
+#bili-helper-panel {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  width: 300px;
+  background: #fff;
+  border: 1px solid #e3e5e7;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 99999;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  color: #333;
+  user-select: none;
+}
+
+.bili-helper-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #00a1d6, #00c0ff);
+  border-radius: 8px 8px 0 0;
+  color: #fff;
+}
+
+.bili-helper-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.bili-helper-minimize {
+  background: rgba(255, 255, 255, 0.3);
+  border: none;
+  color: #fff;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 24px;
+  text-align: center;
+  padding: 0;
+}
+
+.bili-helper-minimize:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.bili-helper-body {
+  padding: 14px;
+}
+
+.bili-helper-section {
+  margin-bottom: 12px;
+}
+
+.bili-helper-desc {
+  color: #999;
+  font-size: 12px;
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.bili-helper-file-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 0;
+  background: #00a1d6;
+  color: #fff;
+  text-align: center;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.2s;
+}
+
+.bili-helper-file-btn:hover {
+  background: #00b5e5;
+}
+
+.bili-helper-file-count {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 8px;
+}
+
+.bili-helper-file-item {
+  padding: 4px 0;
+  font-size: 12px;
+  color: #555;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+.bili-helper-upload-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 0;
+  margin-top: 10px;
+  background: #fb7299;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.bili-helper-upload-btn:hover {
+  background: #fc8bab;
+}
+
+.bili-helper-upload-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+#bili-helper-log {
+  margin-top: 12px;
+  border-top: 1px solid #eee;
+  padding-top: 10px;
+}
+
+#bili-helper-log-content {
+  max-height: 200px;
+  overflow-y: auto;
+  background: #f8f8f8;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #555;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}

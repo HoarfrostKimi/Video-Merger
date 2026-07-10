@@ -1,7 +1,9 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
-import { join, relative, dirname } from 'path'
-import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { join, relative, dirname, extname, basename } from 'path'
+import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, createReadStream } from 'fs'
+import { createServer, Server } from 'http'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { createHash } from 'crypto'
 import { getVideoInfo, convertToMp4, mergeVideos } from './ffmpeg'
 
 let mainWindow: BrowserWindow | null = null
@@ -12,6 +14,74 @@ let convertProgress = 0
 
 // 批量合并进度存储：Map<taskId, progress>
 const batchMergeProgress = new Map<string, number>()
+
+// ============ 本地文件服务器（给 Chrome 插件提供合并后的视频文件） ============
+
+let fileServer: Server | null = null
+let fileServerPort = 0
+const servedFiles = new Map<string, string>() // fileId -> filePath
+let uploadDone = false // 插件投稿完成信号
+
+/** 启动本地文件服务器（如果还没启动） */
+function ensureFileServer(): Promise<number> {
+  if (fileServer) return Promise.resolve(fileServerPort)
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://localhost')
+
+      // 处理插件完成信号
+      if (url.searchParams.get('signal') === 'done') {
+        uploadDone = true
+        console.log('[FileServer] 收到插件完成信号')
+        res.writeHead(200, {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': 'text/plain'
+        })
+        res.end('OK')
+        return
+      }
+
+      const fileId = url.searchParams.get('fileId')
+      if (!fileId || !servedFiles.has(fileId)) {
+        res.writeHead(404)
+        res.end('File not found')
+        return
+      }
+      const filePath = servedFiles.get(fileId)!
+      const stat = statSync(filePath)
+      const ext = extname(filePath).toLowerCase()
+      const mime = ext === '.mp4' ? 'video/mp4' : 'application/octet-stream'
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Length': stat.size,
+        'Access-Control-Allow-Origin': '*',
+        'Accept-Ranges': 'bytes'
+      })
+      createReadStream(filePath).pipe(res)
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address()
+      if (addr && typeof addr === 'object') {
+        fileServer = server
+        fileServerPort = addr.port
+        console.log('[FileServer] 已启动，端口:', fileServerPort)
+        resolve(fileServerPort)
+      } else {
+        reject(new Error('无法获取服务器端口'))
+      }
+    })
+    server.on('error', reject)
+  })
+}
+
+/** 注册文件并返回访问 URL */
+async function registerFileForServe(filePath: string): Promise<string> {
+  const port = await ensureFileServer()
+  const fileId = createHash('sha256').update(filePath).digest('hex').slice(0, 16)
+  servedFiles.set(fileId, filePath)
+  const fileName = basename(filePath)
+  return `http://127.0.0.1:${port}/?fileId=${fileId}&name=${encodeURIComponent(fileName)}`
+}
 
 // ============ 配置管理：记住用户设置 ============
 
@@ -495,6 +565,21 @@ ipcMain.handle('video:convert', async (event, filePath: string, outputPath: stri
 // 8. 获取当前进度（渲染进程轮询调用）
 ipcMain.handle('progress:get', () => {
   return { mergeProgress, convertProgress }
+})
+
+// 12. 注册文件到本地服务器（给 Chrome 插件提供视频文件）
+ipcMain.handle('fileServer:register', async (_event, filePath: string) => {
+  try {
+    const url = await registerFileForServe(filePath)
+    return { success: true, data: url }
+  } catch (error: any) {
+    return { success: false, message: error.message || '文件服务启动失败' }
+  }
+})
+
+// 13. 检查插件是否已完成投稿
+ipcMain.handle('fileServer:checkDone', () => {
+  return uploadDone
 })
 
 // 设置用户数据目录（开发模式用项目内目录，打包后用系统默认目录）

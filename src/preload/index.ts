@@ -46,6 +46,10 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number) => invokeApi('scan
   // 获取当前进度（轮询方式，更可靠）
   getProgress: () => invokeApi('progress:get'),
   getBatchProgress: () => invokeApi('progress:getBatch'),
+
+  // 本地文件服务器（给 Chrome 插件提供视频文件）
+  registerFileForServe: (filePath: string) => invokeApi('fileServer:register', filePath),
+  checkUploadDone: () => invokeApi('fileServer:checkDone'),
 }
 
 if (process.contextIsolated) {

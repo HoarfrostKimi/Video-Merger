@@ -31,12 +31,14 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [batchProgress, setBatchProgress] = useState<Record<string, number>>({})
   const [autoOpenWebsite, setAutoOpenWebsite] = useState(true)
   const [autoOpenFolder, setAutoOpenFolder] = useState(true)
+  const [pluginLinkage, setPluginLinkage] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   // 设置面板的临时值（未保存时不影响实际值）
   const [draftMaxInterval, setDraftMaxInterval] = useState(2.5)
   const [draftConcurrency, setDraftConcurrency] = useState(3)
   const [draftAutoOpenFolder, setDraftAutoOpenFolder] = useState(true)
   const [draftAutoOpenWebsite, setDraftAutoOpenWebsite] = useState(true)
+  const [draftPluginLinkage, setDraftPluginLinkage] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const websiteOpenedRef = useRef(false)
   const folderOpenedRef = useRef(false)
@@ -67,6 +69,9 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         }
         if (config.autoOpenFolder !== undefined) {
           setAutoOpenFolder(config.autoOpenFolder)
+        }
+        if (config.pluginLinkage !== undefined) {
+          setPluginLinkage(config.pluginLinkage)
         }
         if (config.hiddenFolderKeys && Array.isArray(config.hiddenFolderKeys)) {
           loadedHiddenKeys = config.hiddenFolderKeys
@@ -275,8 +280,53 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           }
           // 根据开关状态和是否已打开过来决定是否打开网站
           if (autoOpenWebsite && !websiteOpenedRef.current) {
-            await window.api.openExternal('https://member.bilibili.com/platform/upload/video/frame')
+            // 如果开启了插件联动，注册文件并传递 URL
+            const successTasks = tasks.filter((t) => successKeys.includes(t.taskId))
+            const fileUrls: string[] = []
+            if (pluginLinkage) {
+              for (const task of successTasks) {
+                try {
+                  const url = await window.api.registerFileForServe(task.outputPath)
+                  fileUrls.push(url)
+                } catch {
+                  // 单个文件注册失败不影响其他
+                }
+              }
+            }
+            // 打开B站投稿页面，带文件 URL 参数（仅插件联动时）
+            let bilibiliUrl = 'https://member.bilibili.com/platform/upload/video/frame'
+            if (fileUrls.length > 0) {
+              bilibiliUrl += '?autoFiles=' + fileUrls.map(u => encodeURIComponent(u)).join(',')
+            }
+            await window.api.openExternal(bilibiliUrl)
             websiteOpenedRef.current = true
+
+            // 插件联动开启时，轮询等待插件完成投稿，然后自动关闭 app
+            if (pluginLinkage && fileUrls.length > 0) {
+              let pollCount = 0
+              const maxPoll = 600 // 最多等10分钟
+              const pollTimer = setInterval(async () => {
+                pollCount++
+                try {
+                  const done = await window.api.checkUploadDone()
+                  if (done) {
+                    clearInterval(pollTimer)
+                    console.log('[App] 插件投稿完成，自动关闭')
+                    // 关闭文件夹窗口
+                    if (folderOpenedRef.current && outputFolder) {
+                      // 文件夹窗口无法通过 API 关闭，提示用户
+                    }
+                    // 关闭 app
+                    window.close()
+                  }
+                } catch {
+                  // ignore
+                }
+                if (pollCount >= maxPoll) {
+                  clearInterval(pollTimer)
+                }
+              }, 1000)
+            }
           }
         } catch {
           // ignore
@@ -434,6 +484,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
             setDraftConcurrency(concurrency)
             setDraftAutoOpenFolder(autoOpenFolder)
             setDraftAutoOpenWebsite(autoOpenWebsite)
+            setDraftPluginLinkage(pluginLinkage)
             setShowSettings(true)
           }}
           title="设置"
@@ -678,12 +729,14 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
                 setConcurrency(draftConcurrency)
                 setAutoOpenFolder(draftAutoOpenFolder)
                 setAutoOpenWebsite(draftAutoOpenWebsite)
+                setPluginLinkage(draftPluginLinkage)
                 if (window.api) {
                   window.api.saveConfig({
                     maxIntervalHours: draftMaxInterval,
                     concurrency: draftConcurrency,
                     autoOpenFolder: draftAutoOpenFolder,
-                    autoOpenWebsite: draftAutoOpenWebsite
+                    autoOpenWebsite: draftAutoOpenWebsite,
+                    pluginLinkage: draftPluginLinkage
                   })
                 }
                 setShowSettings(false)
@@ -750,6 +803,16 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               unCheckedChildren="关"
             />
             <Text type="secondary">（仅首次合并后打开）</Text>
+          </Space>
+          <Space wrap style={{ width: '100%' }}>
+            <Text>B站插件联动（自动上传+投稿）:</Text>
+            <Switch
+              checked={draftPluginLinkage}
+              onChange={(checked) => setDraftPluginLinkage(checked)}
+              checkedChildren="开"
+              unCheckedChildren="关"
+            />
+            <Text type="secondary">（开启后自动传递视频给插件，投稿完成后自动关闭 app）</Text>
           </Space>
         </Space>
       </Drawer>
