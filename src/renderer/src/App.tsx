@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { ConfigProvider, theme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import Home from './pages/Home'
@@ -29,19 +29,20 @@ function App(): JSX.Element {
     }
   }
 
+  const themeConfig = useMemo(() => ({
+    algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
+    token: {
+      colorPrimary: '#1677ff',
+      borderRadius: 8
+    }
+  }), [darkMode])
+
   return (
-    <ConfigProvider
-      locale={zhCN}
-      theme={{
-        algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: {
-          colorPrimary: '#1677ff',
-          borderRadius: 8
-        }
-      }}
-    >
-      <Home darkMode={darkMode} onToggleDarkMode={handleToggleDarkMode} />
-    </ConfigProvider>
+    <div data-theme={darkMode ? 'dark' : 'light'} style={{ height: '100%' }}>
+      <ConfigProvider locale={zhCN} theme={themeConfig}>
+        <Home darkMode={darkMode} onToggleDarkMode={handleToggleDarkMode} />
+      </ConfigProvider>
+    </div>
   )
 }
 

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: deliverables
+title: 视频合并 App 增量加固交付物（PRD / 架构评审 / 设计）
+scope:
+    - deliverables/
+source_files: []
+depends_on: []
+related_to: []

@@ -159,6 +159,13 @@ export function updateScanResults(groups: VideoGroup[]): void {
   lastGroups = groups
 }
 
+/** 根据当前排除列表过滤 lastGroups（桌面端排除分组后调用） */
+export function applyExcludeFilter(): void {
+  if (loadConfigFn) configRef = loadConfigFn()
+  const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
+  lastGroups = lastGroups.filter((g) => !hiddenKeys.has(g.key))
+}
+
 /** 获取控制服务器地址 */
 export function getControlUrl(): string {
   if (!controlServer) return ''
@@ -323,7 +330,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   // GET /api/groups
   if (path === '/api/groups' && method === 'GET') {
-    sendJson(res, 200, { groups: lastGroups })
+    // 应用排除列表过滤（确保手机端始终与桌面端同步）
+    if (loadConfigFn) configRef = loadConfigFn()
+    const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
+    const filtered = lastGroups.filter((g) => !hiddenKeys.has(g.key))
+    sendJson(res, 200, { groups: filtered })
     return
   }
 

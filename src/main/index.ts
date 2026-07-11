@@ -24,7 +24,8 @@ import {
   setUploadDoneCallback,
   setResetUploadDoneCallback,
   setIsMainAppMergingCallback,
-  setMergeLockCallbacks
+  setMergeLockCallbacks,
+  applyExcludeFilter
 } from './controlServer'
 import * as mergedFiles from './mergedFiles'
 
@@ -42,6 +43,10 @@ export function setIsMerging(value: boolean): void { isMerging = value }
 
 // 批量合并进度存储：Map<taskId, progress>
 const batchMergeProgress = new Map<string, number>()
+
+// 扫描结果缓存（避免排除/恢复分组时重复遍历文件夹）
+const scanCache = new Map<string, { data: { rootPath: string; folders: any[] }; timestamp: number }>()
+const SCAN_CACHE_TTL = 10_000 // 10秒 TTL
 
 // ============ 本地文件服务器（给 Chrome 插件提供合并后的视频文件） ============
 
@@ -300,6 +305,8 @@ function startConfigWatcher(): void {
               invalidateConfigCache()
               // 刷新控制服务器的配置缓存
               refreshConfig()
+              // 同步排除列表过滤（手机端排除后桌面端即时生效）
+              applyExcludeFilter()
               // 通知渲染进程配置已变
               mainWindow.webContents.send('config-changed')
               console.log('[configWatcher] 配置文件变更，已通知渲染进程')
@@ -438,6 +445,9 @@ ipcMain.handle('config:load', async () => {
 // 保存配置
 ipcMain.handle('config:save', async (_event, config: AppConfig) => {
   saveConfig(config)
+  // 同步到控制服务器（排除列表变更时手机端即时生效）
+  refreshConfig()
+  applyExcludeFilter()
   return { success: true }
 })
 
@@ -479,7 +489,8 @@ function stripVideoExtension(fileName: string): string {
 async function performScan(
   folderPath: string,
   maxIntervalHours: number = 2.5,
-  outputFolder: string = ''
+  outputFolder: string = '',
+  bypassCache: boolean = false
 ): Promise<{
   rootPath: string
   folders: Array<{
@@ -494,6 +505,16 @@ async function performScan(
     lastTimestamp: number
   }>
 }> {
+  // 检查扫描缓存
+  if (!bypassCache) {
+    const cacheKey = `${folderPath}|${maxIntervalHours}|${outputFolder}`
+    const cached = scanCache.get(cacheKey)
+    if (cached && Date.now() - cached.timestamp < SCAN_CACHE_TTL) {
+      console.log('[performScan] 命中扫描缓存')
+      return cached.data
+    }
+  }
+
   interface FlvFile {
     name: string
     path: string
@@ -713,14 +734,18 @@ async function performScan(
     return !hasMergedVideo(searchDir, group.date, group.title, mergedFilesSet)
   })
 
+  // 写入扫描缓存
+  const result = { rootPath: folderPath, folders: filteredGroups }
+  scanCache.set(`${folderPath}|${maxIntervalHours}|${outputFolder}`, { data: result, timestamp: Date.now() })
+
   console.log(`[performScan] 过滤后剩余 ${filteredGroups.length} 组`)
-  return { rootPath: folderPath, folders: filteredGroups }
+  return result
 }
 
 // IPC 处理器：渲染进程调用扫描
 ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHours: number = 2.5, outputFolder: string = '') => {
   try {
-    const result = await performScan(folderPath, maxIntervalHours, outputFolder)
+    const result = await performScan(folderPath, maxIntervalHours, outputFolder, true)
     // 同步扫描结果到控制服务器（手机列表与 App 一致，包含排除列表过滤）
     const latestConfig = loadConfig()
     const hiddenKeys = new Set(latestConfig.hiddenFolderKeys || [])
@@ -834,6 +859,16 @@ ipcMain.handle('video:batchMerge', async (_event, tasks: BatchMergeTask[], concu
       batchMergeProgress.set(task.taskId, 0)
     }
 
+    // 预探测所有任务的首个文件时长（并行加速，批量合并任务无需各自重复探测）
+    const probeResults = await Promise.allSettled(
+      tasks.map(t => getVideoInfo(t.filePaths[0]).catch(() => ({ duration: 0, codec: '', width: 0, height: 0 })))
+    )
+    const estimatedDurations: number[] = probeResults.map(r =>
+      r.status === 'fulfilled' && r.value ? r.value.duration : 0
+    )
+    const totalProbeMs = estimatedDurations.reduce((s, d) => s + d, 0)
+    console.log(`[batchMerge] 并行预探测完成，共 ${tasks.length} 个任务，预估总时长 ${(totalProbeMs / 60).toFixed(1)} 分钟`)
+
     const results: BatchMergeResult[] = []
     let currentIndex = 0
 
@@ -866,7 +901,7 @@ ipcMain.handle('video:batchMerge', async (_event, tasks: BatchMergeTask[], concu
         try {
           const warning = await mergeVideos(task.filePaths, task.outputPath, (percent) => {
             batchMergeProgress.set(task.taskId, percent)
-          })
+          }, undefined, estimatedDurations[taskIndex])
           batchMergeProgress.set(task.taskId, 100)
           results.push({
             taskId: task.taskId,

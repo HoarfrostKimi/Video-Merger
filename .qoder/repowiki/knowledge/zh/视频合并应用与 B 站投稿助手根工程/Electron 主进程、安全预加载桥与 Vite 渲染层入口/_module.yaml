@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: app_source
+title: Electron 主进程、安全预加载桥与 Vite 渲染层入口
+scope:
+    - src/
+source_files: []
+depends_on: []
+related_to: []

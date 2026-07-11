@@ -164,13 +164,15 @@ function safeMoveFile(src: string, dest: string): void {
  * @param outputPath - 输出文件路径
  * @param onProgress - 进度回调函数，参数为 0-100 的百分比
  * @param taskId - 可选的任务 ID，用于取消操作
+ * @param estimatedDuration - 可选的外部预探测时长（秒），为 0 或不传时内部自动探测
  * @returns 如果有文件被跳过，返回警告信息；否则返回 undefined
  */
 export function mergeVideos(
   filePaths: string[],
   outputPath: string,
   onProgress?: (percent: number) => void,
-  taskId?: string
+  taskId?: string,
+  estimatedDuration?: number
 ): Promise<string | undefined> {
   return new Promise(async (resolve, reject) => {
     if (filePaths.length === 0) {
@@ -207,25 +209,38 @@ export function mergeVideos(
       return
     }
 
-    let totalDuration = 0
+    let totalDuration = estimatedDuration && estimatedDuration > 0 ? estimatedDuration : 0
     let totalSourceSize = 0
-    try {
-      const firstInfo = await ffmpegProbe(accessibleFiles[0])
-      const firstSize = statSync(accessibleFiles[0]).size
-      let totalSize = 0
-      for (const f of accessibleFiles) {
-        try {
-          totalSize += statSync(f).size
-        } catch { /* ignore */ }
+    // 只有未提供预探测时长时才内部探测（批量合并时已在外部并行探测）
+    if (!estimatedDuration || estimatedDuration <= 0) {
+      try {
+        const firstInfo = await ffmpegProbe(accessibleFiles[0])
+        const firstSize = statSync(accessibleFiles[0]).size
+        let totalSize = 0
+        for (const f of accessibleFiles) {
+          try {
+            totalSize += statSync(f).size
+          } catch { /* ignore */ }
+        }
+        totalSourceSize = totalSize
+        if (firstInfo.duration > 0 && firstSize > 0) {
+          const bitrate = firstSize / firstInfo.duration
+          totalDuration = totalSize / bitrate
+        }
+        console.log(`估算总时长: ${totalDuration.toFixed(1)}秒 (基于第一个文件推算)`)
+      } catch {
+        totalDuration = 0
       }
-      totalSourceSize = totalSize
-      if (firstInfo.duration > 0 && firstSize > 0) {
-        const bitrate = firstSize / firstInfo.duration
-        totalDuration = totalSize / bitrate
-      }
-      console.log(`估算总时长: ${totalDuration.toFixed(1)}秒 (基于第一个文件推算)`)
-    } catch {
-      totalDuration = 0
+    } else {
+      // 使用预探测时长，仅需计算总文件大小用于磁盘空间检查
+      console.log(`使用预探测时长: ${estimatedDuration.toFixed(1)}秒`)
+      try {
+        for (const f of accessibleFiles) {
+          try {
+            totalSourceSize += statSync(f).size
+          } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
     }
 
     // 磁盘空间预检

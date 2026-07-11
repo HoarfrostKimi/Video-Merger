@@ -1,41 +1,17 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { Layout, Card, Button, Table, Progress, Space, Tag, message, Typography, Input, Modal, Badge } from 'antd'
-import { FolderOpenOutlined, ScanOutlined, MergeCellsOutlined, ClearOutlined, BulbOutlined, BulbFilled, EyeInvisibleOutlined, EyeOutlined, UndoOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons'
-import type { ColumnsType } from 'antd/es/table'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Layout, Button, Space, Tag, message, Typography, Badge, Empty, Progress, Card } from 'antd'
+import { MergeCellsOutlined, BulbOutlined, BulbFilled, SettingOutlined, UploadOutlined } from '@ant-design/icons'
 import SettingsDrawer from './SettingsDrawer'
+import FolderToolbar from '../components/FolderToolbar'
+import MergeTable from '../components/MergeTable'
+import SubFileList from '../components/SubFileList'
+import HiddenFoldersPanel from '../components/HiddenFoldersPanel'
+import MergeActionBar from '../components/MergeActionBar'
+import UploadModal from '../components/UploadModal'
+import { formatPercent, formatTime } from '../utils/format'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
-
-// ============ 工具函数（组件外部，避免每次渲染重建） ============
-
-// 格式化百分比：小于 1% 时显示一位小数，否则显示整数
-const formatPercent = (p: number) => {
-  if (p <= 0) return '0'
-  if (p < 1) return p.toFixed(1)
-  return p.toFixed(0)
-}
-
-// 格式化秒数为 mm:ss 或 hh:mm:ss
-const formatTime = (s: number) => {
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = Math.floor(s % 60)
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-  return `${m}:${String(sec).padStart(2, '0')}`
-}
-
-const formatSize = (bytes: number): string => {
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-// 从合并文件名提取简洁显示名：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
-const formatUploadName = (fileName: string) => {
-  const match = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/)
-  return match ? `${match[1]} ${match[2]}` : fileName.replace(/\.mp4$/i, '')
-}
 
 interface HomeProps {
   darkMode: boolean
@@ -94,7 +70,6 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           setInputFolder(config.inputFolder)
         }
         if (config.outputFolder) {
-          loadedOutputFolder = config.outputFolder
           setOutputFolder(config.outputFolder)
         }
         if (config.maxIntervalHours !== undefined) {
@@ -503,66 +478,35 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     setSelectedFolder(record)
   }
 
-  const columns = useMemo<ColumnsType<FolderGroup>>(() => [
-    {
-      title: '日期',
-      dataIndex: 'date',
-      key: 'date',
-      width: 110,
-      align: 'center',
-      render: (date: string) => <Tag color="blue">{date}</Tag>
-    },
-    {
-      title: '标题',
-      dataIndex: 'title',
-      key: 'title',
-      ellipsis: true,
-      render: (title: string) => <Text>{title}</Text>
-    },
-    {
-      title: '片段',
-      dataIndex: 'fileCount',
-      key: 'fileCount',
-      width: 80,
-      align: 'center',
-      render: (count: number) => <Tag color="blue">{count}</Tag>
-    },
-    {
-      title: '类型',
-      dataIndex: 'folderName',
-      key: 'type',
-      width: 100,
-      align: 'center',
-      render: () => <Tag color="green">原始视频</Tag>
-    },
-    {
-      title: '大小',
-      dataIndex: 'totalSize',
-      key: 'totalSize',
-      width: 120,
-      align: 'right',
-      render: (size: number) => formatSize(size)
-    },
-    {
-      title: '输出文件',
-      dataIndex: 'key',
-      key: 'output',
-      ellipsis: true,
-      render: (_: string, record: FolderGroup) => {
-        return <Text type="secondary">{genMergeFileName(record)}.mp4</Text>
-      }
+  // 投稿上传处理
+  const handleUpload = useCallback(async (selectedPaths: string[]) => {
+    if (!window.api) return
+    setUploading(true)
+    try {
+      await window.api.uploadMergedFiles(selectedPaths)
+      message.success('已打开B站投稿页面')
+      // 刷新列表
+      const list = await window.api.getMergedFiles()
+      setMergedFiles(list)
+      setUploadSelectedKeys([])
+      setShowUploadModal(false)
+    } catch (err: any) {
+      message.error(err.message || '投稿失败')
+    } finally {
+      setUploading(false)
     }
-  ], [genMergeFileName])
+  }, [])
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Header
         style={{
-          background: darkMode ? '#141414' : '#fff',
+          background: 'var(--color-bg-header)',
           padding: '0 24px',
           display: 'flex',
           alignItems: 'center',
-          borderBottom: darkMode ? '1px solid #303030' : '1px solid #f0f0f0'
+          borderBottom: '1px solid var(--color-border-base)',
+          transition: 'background-color 0.3s ease'
         }}
       >
         <Title level={3} style={{ margin: 0 }}>
@@ -597,210 +541,67 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       </Header>
 
       <Content style={{ padding: 24 }}>
-        <Card size="small" style={{ marginBottom: 16 }}>
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Text strong>输入目录（扫描视频文件）</Text>
-            <Space wrap>
-              <Input
-                value={inputFolder}
-                readOnly
-                style={{ flex: 1, minWidth: 400 }}
-                placeholder="请选择文件夹"
-              />
-              <Button icon={<FolderOpenOutlined />} onClick={handleSelectInputFolder}>
-                浏览...
-              </Button>
-              <Button onClick={handleScan} loading={scanning} icon={<ScanOutlined />}>
-                扫描视频
-              </Button>
-            </Space>
-            <Text strong>输出目录（保存合并后的MP4）</Text>
-            <Space wrap>
-              <Input
-                value={outputFolder}
-                readOnly
-                style={{ flex: 1, minWidth: 400 }}
-                placeholder="请选择输出文件夹"
-              />
-              <Button icon={<FolderOpenOutlined />} onClick={handleSelectOutputFolder}>
-                浏览...
-              </Button>
-            </Space>
-          </Space>
-        </Card>
+        <FolderToolbar
+          inputFolder={inputFolder}
+          outputFolder={outputFolder}
+          scanning={scanning}
+          onSelectInput={handleSelectInputFolder}
+          onSelectOutput={handleSelectOutputFolder}
+          onScan={handleScan}
+        />
 
         {folders.length > 0 && (
           <>
-            <Card
-              size="small"
-              style={{ marginBottom: 16 }}
-              title={
-                <Space>
-                  <Text strong>待合并视频</Text>
-                  <Tag color="green">发现 {folders.length} 组待合并，共 {folders.reduce((s, f) => s + f.fileCount, 0)} 个片段</Tag>
-                </Space>
-              }
-              extra={
-                <Space>
-                  <Button size="small" onClick={() => setSelectedRowKeys(folders.map((f) => f.key))}>
-                    全选
-                  </Button>
-                  <Button size="small" onClick={() => setSelectedRowKeys([])} icon={<ClearOutlined />}>
-                    取消全选
-                  </Button>
-                  <Button size="small" danger icon={<EyeInvisibleOutlined />} onClick={handleHideSelected}>
-                    排除选中
-                  </Button>
-                  {hiddenFolders.length > 0 && (
-                    <Button size="small" icon={<EyeOutlined />} onClick={() => setShowHidden(!showHidden)}>
-                      查看已排除 ({hiddenFolders.length})
-                    </Button>
-                  )}
-                </Space>
-              }
-            >
-              <Table
-                dataSource={folders}
-                columns={columns}
-                rowKey="key"
-                size="small"
-                pagination={false}
-                scroll={{ y: 250 }}
-                onRow={(record) => ({
-                  onClick: () => handleRowClick(record)
-                })}
-                rowSelection={{
-                  selectedRowKeys,
-                  onChange: (keys) => setSelectedRowKeys(keys)
-                }}
-              />
-            </Card>
+            <MergeTable
+              folders={folders}
+              selectedRowKeys={selectedRowKeys}
+              onSelectAll={() => setSelectedRowKeys(folders.map((f) => f.key))}
+              onClearSelection={() => setSelectedRowKeys([])}
+              onHideSelected={handleHideSelected}
+              hiddenFolderCount={hiddenFolders.length}
+              showHidden={showHidden}
+              onToggleHidden={() => setShowHidden(!showHidden)}
+              onRowClick={handleRowClick}
+              onSelectionChange={setSelectedRowKeys}
+              genMergeFileName={genMergeFileName}
+            />
 
-            <Card
-              size="small"
-              style={{ marginBottom: 16 }}
-              title={<Text strong>选中任务的子文件列表</Text>}
-            >
-              {selectedFolder ? (
-                <div style={{ maxHeight: 150, overflowY: 'auto' }}>
-                  <Text type="secondary">共 {selectedFolder.fileCount} 个片段，合计 {formatSize(selectedFolder.totalSize)}:</Text>
-                  <div style={{ marginTop: 8 }}>
-                    {selectedFolder.files.map((file, index) => (
-                      <div key={file.path} style={{ padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
-                        <Text>{index + 1}.</Text>
-                        <Text style={{ marginLeft: 8 }}>{file.name}</Text>
-                        <Text type="secondary" style={{ marginLeft: 12 }}>({formatSize(file.size)})</Text>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <Text type="secondary">请选择一个文件夹查看子文件列表</Text>
-              )}
-            </Card>
+            <SubFileList selectedFolder={selectedFolder} />
 
             {/* 已排除分组面板 */}
             {showHidden && hiddenFolders.length > 0 && (
-              <Card
-                size="small"
-                style={{ marginBottom: 16, border: '1px dashed #d9d9d9' }}
-                title={
-                  <Space>
-                    <Text strong>已排除的分组</Text>
-                    <Tag color="orange">{hiddenFolders.length} 个</Tag>
-                  </Space>
-                }
-                extra={
-                  <Button size="small" icon={<UndoOutlined />} onClick={handleRestoreAll}>
-                    全部恢复
-                  </Button>
-                }
-              >
-                <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-                  {hiddenFolders.map((folder) => (
-                    <div
-                      key={folder.key}
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        padding: '8px 12px',
-                        borderBottom: '1px solid #f0f0f0'
-                      }}
-                    >
-                      <Space>
-                        <Tag color="orange">{folder.date}</Tag>
-                        <Text>{folder.folderName}</Text>
-                        <Text type="secondary">({folder.fileCount}个片段, {formatSize(folder.totalSize)})</Text>
-                      </Space>
-                      <Button
-                        size="small"
-                        icon={<UndoOutlined />}
-                        onClick={() => handleRestoreOne(folder.key)}
-                      >
-                        恢复
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+              <HiddenFoldersPanel
+                hiddenFolders={hiddenFolders}
+                onRestoreOne={handleRestoreOne}
+                onRestoreAll={handleRestoreAll}
+              />
             )}
 
-            <Card size="small">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Text>{processing ? `${statusText ? statusText + '  ' : ''}${formatPercent(progress)}%  已用时 ${formatTime(elapsedSeconds)}` : `扫描完成 - ${folders.length} 组待合并`}</Text>
-                <Space>
-                  <Button icon={<FolderOpenOutlined />} onClick={handleOpenDirectory}>
-                    打开目录
-                  </Button>
-                  <Button
-                    type="primary"
-                    icon={<MergeCellsOutlined />}
-                    onClick={handleMerge}
-                    loading={processing}
-                    disabled={selectedRowKeys.length === 0}
-                    size="large"
-                  >
-                    一键合并选中视频
-                  </Button>
-                </Space>
-              </div>
-              {processing && (
-                <div style={{ marginTop: 12 }}>
-                  <Progress percent={parseFloat(progress.toFixed(1))} status="active" format={() => `${formatPercent(progress)}%`} />
-                  {/* 显示每个任务的进度 */}
-                  {Object.keys(batchProgress).length > 0 && (
-                    <div style={{ marginTop: 12 }}>
-                      {selectedRowKeys.map((key) => {
-                        const keyStr = String(key)
-                        const folder = folders.find((f) => f.key === keyStr)
-                        if (!folder) return null
-                        const taskProgress = batchProgress[keyStr]
-                        if (taskProgress === undefined) return null
-
-                        const status = taskProgress === 100 ? 'success' : taskProgress === -1 ? 'exception' : 'active'
-                        const percent = taskProgress === -1 ? 0 : taskProgress
-
-                        return (
-                          <div key={key} style={{ marginBottom: 8 }}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              {folder.folderName}
-                            </Text>
-                            <Progress
-                              percent={parseFloat(percent.toFixed(1))}
-                              status={status}
-                              size="small"
-                              format={() => taskProgress === -1 ? '失败' : `${formatPercent(percent)}%`}
-                            />
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </Card>
+            <MergeActionBar
+              processing={processing}
+              progress={progress}
+              statusText={statusText}
+              elapsedSeconds={elapsedSeconds}
+              batchProgress={batchProgress}
+              folders={folders}
+              selectedRowKeys={selectedRowKeys}
+              onMerge={handleMerge}
+              onOpenDirectory={handleOpenDirectory}
+            />
           </>
+        )}
+
+        {folders.length === 0 && !scanning && !processing && (
+          <Card size="small" style={{ marginTop: 16 }}>
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={
+                <span>
+                  {inputFolder ? '未发现待合并的视频分组，请检查目录或调整设置' : '请选择视频文件所在目录，点击扫描开始'}
+                </span>
+              }
+            />
+          </Card>
         )}
 
         {processing && !folders.length && (
@@ -852,115 +653,16 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       />
 
       {/* 投稿弹窗 */}
-      <Modal
-        title={
-          <Space>
-            <UploadOutlined />
-            <span>待投稿文件</span>
-            <Tag color="blue">{mergedFiles.length} 个文件</Tag>
-          </Space>
-        }
-        open={showUploadModal}
-        onCancel={() => setShowUploadModal(false)}
-        width={700}
-        footer={
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Space>
-              <Button
-                size="small"
-                onClick={() => setUploadSelectedKeys(mergedFiles.map((f) => f.index))}
-              >
-                全选
-              </Button>
-              <Button
-                size="small"
-                onClick={() => setUploadSelectedKeys([])}
-              >
-                取消全选
-              </Button>
-            </Space>
-            <Space>
-              <Button onClick={() => setShowUploadModal(false)}>关闭</Button>
-              <Button
-                type="primary"
-                icon={<UploadOutlined />}
-                loading={uploading}
-                disabled={uploadSelectedKeys.length === 0}
-                onClick={async () => {
-                  if (!window.api || uploadSelectedKeys.length === 0) return
-                  setUploading(true)
-                  try {
-                    const selectedPaths = mergedFiles
-                      .filter((f) => uploadSelectedKeys.includes(f.index))
-                      .map((f) => f.path)
-                    await window.api.uploadMergedFiles(selectedPaths)
-                    message.success('已打开B站投稿页面')
-                    // 刷新列表
-                    const list = await window.api.getMergedFiles()
-                    setMergedFiles(list)
-                    setUploadSelectedKeys([])
-                    setShowUploadModal(false)
-                  } catch (err: any) {
-                    message.error(err.message || '投稿失败')
-                  } finally {
-                    setUploading(false)
-                  }
-                }}
-              >
-                投稿选中文件
-              </Button>
-            </Space>
-          </div>
-        }
-      >
-        <Table
-          dataSource={mergedFiles}
-          rowKey="index"
-          size="small"
-          pagination={false}
-          scroll={{ y: 400 }}
-          rowSelection={{
-            selectedRowKeys: uploadSelectedKeys,
-            onChange: (keys) => setUploadSelectedKeys(keys)
-          }}
-          columns={[
-            {
-              title: '#',
-              key: 'no',
-              width: 50,
-              align: 'center',
-              render: (_: unknown, __: unknown, index: number) => index + 1
-            },
-            {
-              title: '文件名',
-              dataIndex: 'name',
-              key: 'name',
-              ellipsis: true,
-              render: (name: string) => <Text>{formatUploadName(name)}</Text>
-            },
-            {
-              title: '修改时间',
-              dataIndex: 'mtime',
-              key: 'mtime',
-              width: 150,
-              align: 'center',
-              render: (mtime: number) => {
-                const d = new Date(mtime)
-                const pad = (n: number) => String(n).padStart(2, '0')
-                return <Text type="secondary">{d.getFullYear()}-{pad(d.getMonth() + 1)}-{pad(d.getDate())} {pad(d.getHours())}:{pad(d.getMinutes())}</Text>
-              }
-            },
-            {
-              title: '路径',
-              dataIndex: 'path',
-              key: 'path',
-              ellipsis: true,
-              render: (path: string) => <Text type="secondary" style={{ fontSize: 12 }}>{path}</Text>
-            }
-          ]}
-          locale={{ emptyText: '暂无已合并文件，请先合并视频' }}
-        />
-      </Modal>
+      <UploadModal
+        visible={showUploadModal}
+        mergedFiles={mergedFiles}
+        uploading={uploading}
+        selectedKeys={uploadSelectedKeys}
+        onClose={() => setShowUploadModal(false)}
+        onSelectChange={setUploadSelectedKeys}
+        onUpload={handleUpload}
+        onLoadFiles={loadMergedFiles}
+      />
     </Layout>
   )
 }

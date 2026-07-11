@@ -1,0 +1,19 @@
+schema_version: 1
+module_path: ""
+title: 视频合并应用与 B 站投稿助手根工程
+scope:
+    - .gitignore
+    - package.json
+    - electron.vite.config.ts
+    - tsconfig.json
+    - tsconfig.node.json
+    - tsconfig.web.json
+    - electron-builder.yml
+    - build.sh
+    - build.bat
+    - 产品需求文档.md
+    - .npmrc.bak
+    - package-lock.json
+source_files: []
+depends_on: []
+related_to: []
