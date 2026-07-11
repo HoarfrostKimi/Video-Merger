@@ -18,6 +18,24 @@ Thumbs.db
 # workbuddy 工作记录
 .workbuddy/
 
+# Qoder 内部知识库
+.qoder/
+
+# 交付物文档
+deliverables/
+
+# 产品需求文档
+产品需求文档.md
+
+# 空上传目录
+.uploads/
+
+# TypeScript 构建信息
+*.tsbuildinfo
+
+# 备份文件
+.npmrc.bak
+
 # 日志
 *.log
 npm-debug.log*
