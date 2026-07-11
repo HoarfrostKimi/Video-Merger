@@ -15,6 +15,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# workbuddy 工作记录
+.workbuddy/
+
 # 日志
 *.log
 npm-debug.log*
