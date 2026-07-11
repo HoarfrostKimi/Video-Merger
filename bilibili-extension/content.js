@@ -238,24 +238,25 @@
   }
 
   /**
-   * Step 4: 设置可见范围为「仅自己可见」
+   * Step 4: 设置可见范围
    * 可见范围是自定义 check-radio-v2 组件，非原生 radio 也非 el-select
+   * @param {string} targetText - 要选中的可见范围文本，如'公开可见'、'仅自己可见'
    */
-  async function stepSetVisibility(onLog) {
-    onLog('设置可见范围...')
+  async function stepSetVisibility(onLog, targetText) {
+    const text = targetText || '仅自己可见'
+    onLog(`设置可见范围为「${text}」...`)
 
-    // 查找包含「仅自己可见」文本的 check-radio-v2-container
+    // 查找包含目标文本的 check-radio-v2-container
     const nameSpans = document.querySelectorAll('.check-radio-v2-name')
     for (const span of nameSpans) {
-      if (span.textContent.trim() === '仅自己可见') {
+      if (span.textContent.trim() === text) {
         const container = span.closest('.check-radio-v2-container')
         if (container) {
-          // 检查是否已选中（容器可能有 active/checked 类名）
           if (container.classList.contains('active') || container.classList.contains('checked') || container.querySelector('.check-radio-v2-box')?.classList.contains('checked')) {
-            onLog('可见范围已是「仅自己可见」')
+            onLog(`可见范围已是「${text}」`)
           } else {
             container.click()
-            onLog('可见范围已设置为「仅自己可见」')
+            onLog(`可见范围已设置为「${text}」`)
           }
           await sleep(500)
           return
@@ -272,18 +273,18 @@
         .map(n => n.textContent)
         .join('')
         .trim()
-      if (directText === '仅自己可见') {
+      if (directText === text) {
         const clickable = el.closest('.check-radio-v2-container') || el.parentElement
         if (clickable) {
           clickable.click()
-          onLog('可见范围已设置（备用方案）')
+          onLog(`可见范围已设置为「${text}」（备用方案）`)
           await sleep(500)
           return
         }
       }
     }
 
-    onLog('提示: 未找到可见范围控件，请手动设置')
+    onLog(`提示: 未找到可见范围「${text}」，请手动设置`)
     await sleep(500)
   }
 
@@ -567,7 +568,7 @@
   /**
    * 上传并自动投稿一个视频
    */
-  async function uploadAndSubmit(file, onLog) {
+  async function uploadAndSubmit(file, onLog, targetText) {
     const title = parseTitle(file.name)
     onLog(`视频: ${file.name}`)
     onLog(`解析标题: ${title}`)
@@ -583,7 +584,7 @@
     await stepSetDeclaration(onLog)
 
     // Step 4: 设置可见范围
-    await stepSetVisibility(onLog)
+    await stepSetVisibility(onLog, targetText)
 
     // Step 5: 设置封面（第一个视频跳过截帧，B站自动推荐）
     await stepSetCover(file, onLog, true)
@@ -718,7 +719,7 @@
   /**
    * 批量上传：第一个视频正常上传，后续点击队列卡片进入编辑页面再上传
    */
-  async function batchUpload(files, onLog) {
+  async function batchUpload(files, onLog, targetText) {
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
       onLog(`===== 第 ${i + 1}/${files.length} 个视频 =====`)
@@ -726,7 +727,7 @@
       try {
         if (i === 0) {
           // 第一个视频：通过主文件输入框上传
-          await uploadAndSubmit(file, onLog)
+          await uploadAndSubmit(file, onLog, targetText)
         } else {
           // 后续视频：通过"添加分P"按钮上传
           onLog('查找添加分P按钮...')
@@ -868,7 +869,7 @@
           // 填表
           await stepWaitForForm(onLog)
           await stepSetDeclaration(onLog)
-          await stepSetVisibility(onLog)
+          await stepSetVisibility(onLog, targetText)
           await stepSetCover(file, onLog)
           await stepSubmit(onLog)
 
@@ -895,6 +896,13 @@
       <div class="bili-helper-body" id="bili-helper-body">
         <div class="bili-helper-section">
           <p class="bili-helper-desc">选择合并好的MP4文件，自动上传并提交到B站</p>
+          <div class="bili-helper-setting-row">
+            <span class="bili-helper-setting-label">可见范围</span>
+            <select class="bili-helper-setting-select" id="bili-helper-visibility">
+              <option value="公开可见">公开可见</option>
+              <option value="仅自己可见" selected>仅自己可见</option>
+            </select>
+          </div>
           <label class="bili-helper-file-btn">
             选择MP4文件
             <input type="file" id="bili-helper-files" multiple accept=".mp4" style="display:none" />
@@ -911,6 +919,17 @@
       </div>
     `
     document.body.appendChild(panel)
+
+    // 从 localStorage 加载已保存的可见范围设置
+    const savedVisibility = localStorage.getItem('bili_helper_visibility')
+    if (savedVisibility) {
+      const select = document.getElementById('bili-helper-visibility')
+      select.value = savedVisibility
+    }
+    // 每次修改时保存
+    document.getElementById('bili-helper-visibility').addEventListener('change', (e) => {
+      localStorage.setItem('bili_helper_visibility', e.target.value)
+    })
 
     // 最小化/展开
     let minimized = false
@@ -956,7 +975,8 @@
         }
 
         try {
-          await batchUpload(files, onLog)
+          const visText = document.getElementById('bili-helper-visibility').value
+          await batchUpload(files, onLog, visText)
           startBtn.textContent = '全部完成'
         } catch (err) {
           onLog(`错误: ${err.message}`)
@@ -1016,7 +1036,8 @@
           onLog(`共获取 ${files.length} 个视频，开始自动上传...`)
           onLog('')
 
-          await batchUpload(files, onLog)
+          const visText = document.getElementById('bili-helper-visibility').value
+          await batchUpload(files, onLog, visText)
           onLog('')
           onLog('===== 全部处理完成 =====')
 

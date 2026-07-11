@@ -126,6 +126,35 @@
   padding-top: 10px;
 }
 
+.bili-helper-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.bili-helper-setting-label {
+  color: #666;
+  min-width: 60px;
+}
+
+.bili-helper-setting-select {
+  flex: 1;
+  margin-left: 8px;
+  padding: 4px 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #333;
+  background: #fff;
+  outline: none;
+}
+
+.bili-helper-setting-select:focus {
+  border-color: #00a1d6;
+}
+
 #bili-helper-log-content {
   max-height: 200px;
   overflow-y: auto;
