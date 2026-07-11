@@ -29,11 +29,16 @@ const MergeActionBar: React.FC<MergeActionBarProps> = React.memo(({
   onOpenDirectory
 }) => {
   return (
-    <Card size="small">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Text>{processing ? `${statusText ? statusText + '  ' : ''}${formatPercent(progress)}%  已用时 ${formatTime(elapsedSeconds)}` : `扫描完成 - ${folders.length} 组待合并`}</Text>
+    <Card size="small" style={{ borderRadius: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+        <Text style={{ fontSize: 13, lineHeight: 1.6 }}>
+          {processing
+            ? `${statusText || '正在合并...'}  ${formatPercent(progress)}% · 已用时 ${formatTime(elapsedSeconds)}`
+            : `扫描完成 · ${folders.length} 组待合并`
+          }
+        </Text>
         <Space>
-          <Button icon={<FolderOpenOutlined />} onClick={onOpenDirectory}>
+          <Button icon={<FolderOpenOutlined />} onClick={onOpenDirectory} style={{ fontSize: 13 }}>
             打开目录
           </Button>
           <Button
@@ -43,14 +48,20 @@ const MergeActionBar: React.FC<MergeActionBarProps> = React.memo(({
             loading={processing}
             disabled={selectedRowKeys.length === 0}
             size="large"
+            style={{ fontSize: 14, paddingLeft: 20, paddingRight: 20 }}
           >
             {selectedRowKeys.length > 0 ? `一键合并选中视频（${selectedRowKeys.length}个分组）` : '一键合并选中视频'}
           </Button>
         </Space>
       </div>
       {processing && (
-        <div style={{ marginTop: 12 }}>
-          <Progress percent={parseFloat(progress.toFixed(1))} status="active" format={() => `${formatPercent(progress)}%`} />
+        <div style={{ marginTop: 16 }}>
+          <Progress
+            percent={parseFloat(progress.toFixed(1))}
+            status="active"
+            strokeColor="var(--color-primary)"
+            format={() => `${formatPercent(progress)}%`}
+          />
           {/* 显示每个任务的进度 */}
           {Object.keys(batchProgress).length > 0 && (
             <div style={{ marginTop: 12 }}>

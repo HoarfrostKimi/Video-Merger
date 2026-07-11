@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, NativeImage } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, NativeImage, nativeTheme } from 'electron'
 import { join, relative, dirname, extname, basename } from 'path'
 import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, createReadStream, watch, renameSync, unlinkSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
@@ -337,13 +337,63 @@ function stopConfigWatcher(): void {
 let appTray: Tray | null = null
 let forceQuit = false // 为 true 时关闭窗口真正退出，否则隐藏到托盘
 
+/** 生成系统托盘图标（32x32 蓝色圆形 + 白色播放三角符号） */
+function createTrayIcon(): NativeImage {
+  const size = 32
+  const buf = Buffer.alloc(size * size * 4, 0)
+
+  const cx = 15.5, cy = 15.5
+  const bgR = 14, innerR = 12.5
+
+  // 辅助函数：判断点是否在三角形内（重心坐标法）
+  function inTriangle(
+    px: number, py: number,
+    x1: number, y1: number,
+    x2: number, y2: number,
+    x3: number, y3: number
+  ): boolean {
+    const d1 = (px - x2) * (y1 - y2) - (x1 - x2) * (py - y2)
+    const d2 = (px - x3) * (y2 - y3) - (x2 - x3) * (py - y3)
+    const d3 = (px - x1) * (y3 - y1) - (x3 - x1) * (py - y1)
+    const hasNeg = d1 < 0 || d2 < 0 || d3 < 0
+    const hasPos = d1 > 0 || d2 > 0 || d3 > 0
+    return !(hasNeg && hasPos)
+  }
+
+  // 播放三角顶点：尖端(22,15.5)，左上(10,8.5)，左下(10,22.5)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = x - cx, dy = y - cy
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const idx = (y * size + x) * 4
+
+      if (dist <= bgR) {
+        // 蓝色圆形背景
+        const alpha = Math.min(1, Math.max(0, (bgR - dist + 0.5))) // 边缘抗锯齿
+        buf[idx] = Math.round(22 * alpha)     // R
+        buf[idx + 1] = Math.round(119 * alpha) // G
+        buf[idx + 2] = Math.round(255 * alpha) // B
+        buf[idx + 3] = Math.round(255 * alpha) // A
+
+        // 白色播放三角
+        if (dist <= innerR && inTriangle(x + 0.5, y + 0.5, 22, 15.5, 10, 8.5, 10, 22.5)) {
+          buf[idx] = 255
+          buf[idx + 1] = 255
+          buf[idx + 2] = 255
+          buf[idx + 3] = 255
+        }
+      }
+    }
+  }
+
+  // 创建 NativeImage（raw BGRA pixel data）
+  return nativeImage.createFromBuffer(buf, { width: size, height: size })
+}
+
 /** 创建系统托盘图标 */
 function createTray(): void {
   if (appTray) return
-  // 用代码生成一个简单的 16x16 托盘图标（蓝色圆形 + V 字母）
-  const icon = nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAhElEQVQ4T2NkoBAwUqifYdAY8B8E/v9nYPz/H8wAM4BxMBjwn+E/AwMDIyMDYzADshDFDIb/DAz/GRn+M/zHxQOm/wwM/8EMFkYYA1AM+M/AwMjIwMjIAMwwDLIA2YB/DAwM/0EMFkYYA1AM+M/AwMjIwMjIAMwwDLIAxYB/DAwM/0EMAAHEf5ZB7P+0AAAAAElFTkSuQmCC'
-  )
+  const icon = createTrayIcon()
   appTray = new Tray(icon)
   appTray.setToolTip('视频合并工具')
   updateTrayMenu()
@@ -1048,6 +1098,12 @@ ipcMain.handle('app:forceQuit', () => {
   return { success: true }
 })
 
+// 22. 设置原生主题（影响窗口标题栏颜色）
+ipcMain.handle('theme:set', async (_event, darkMode: boolean) => {
+  nativeTheme.themeSource = darkMode ? 'dark' : 'light'
+  return { success: true }
+})
+
 // 22. 获取已合并文件列表（投稿页使用，扫描输出文件夹）
 ipcMain.handle('mergedFiles:get', () => {
   const config = loadConfig()
@@ -1111,6 +1167,8 @@ app.whenReady().then(() => {
 
   // 启动手机控制服务器
   const config = loadConfig()
+  // 根据配置设置原生主题（窗口标题栏颜色跟随深色模式）
+  nativeTheme.themeSource = config.darkMode ? 'dark' : 'light'
   setConfigCallbacks(loadConfig, saveConfig)
   setFileServerCallback(registerFileForServe)
   setOpenExternalCallback((url: string) => { shell.openExternal(url) })
@@ -1118,12 +1176,8 @@ app.whenReady().then(() => {
   setScanCallback(async (folderPath: string, maxIntervalHours: number) => {
     const latestCfg = loadConfig()
     const result = await performScan(folderPath, maxIntervalHours, latestCfg.outputFolder || '')
-    // 应用排除列表（hiddenFolderKeys），保持与 App 列表一致
-    const latestConfig = loadConfig()
-    const hiddenKeys = new Set(latestConfig.hiddenFolderKeys || [])
-    const filtered = result.folders.filter((f) => !hiddenKeys.has(f.key))
-    updateScanResults(filtered)
-    return filtered
+    // 返回全量列表（由调用方自行过滤排除项，用于已排除列表查询）
+    return result.folders
   })
   // 设置排除列表更新回调（手机操作排除时同步到主 App）
   setUpdateHiddenKeysCallback((keys: string[]) => {

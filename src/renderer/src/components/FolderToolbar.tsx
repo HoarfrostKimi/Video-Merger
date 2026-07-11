@@ -22,9 +22,9 @@ const FolderToolbar: React.FC<FolderToolbarProps> = React.memo(({
   onScan
 }) => {
   return (
-    <Card size="small" style={{ marginBottom: 16 }}>
+    <Card size="small" style={{ marginBottom: 16, borderRadius: 10 }}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Text strong>输入目录（扫描视频文件）</Text>
+        <Text strong style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>📂 输入目录</Text>
         <Space wrap>
           <Input
             value={inputFolder}
@@ -39,7 +39,7 @@ const FolderToolbar: React.FC<FolderToolbarProps> = React.memo(({
             扫描视频
           </Button>
         </Space>
-        <Text strong>输出目录（保存合并后的MP4）</Text>
+        <Text strong style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>📁 输出目录</Text>
         <Space wrap>
           <Input
             value={outputFolder}

@@ -19,10 +19,10 @@ const HiddenFoldersPanel: React.FC<HiddenFoldersPanelProps> = React.memo(({
   return (
     <Card
       size="small"
-      style={{ marginBottom: 16, border: '1px dashed var(--color-border-card)' }}
+      style={{ marginBottom: 16, border: '1px dashed var(--color-border-card)', borderRadius: 10 }}
       title={
         <Space>
-          <Text strong>已排除的分组</Text>
+          <Text strong style={{ fontSize: 14 }}>已排除的分组</Text>
           <Tag color="orange">{hiddenFolders.length} 个</Tag>
         </Space>
       }

@@ -11,16 +11,29 @@ html, body, #root {
 
 /* ============ 设计令牌 ============ */
 :root {
+  /* 背景 */
   --color-bg-layout: #f5f5f5;
   --color-bg-header: #fff;
   --color-bg-card: #fff;
   --color-bg-info: #f6ffed;
+  --color-bg-hover: #fafafa;
+  --color-bg-row-hover: #f0f5ff;
+  /* 边框 */
   --color-border-base: #f0f0f0;
   --color-border-card: #d9d9d9;
   --color-border-info: #b7eb8f;
+  /* 文本 */
   --color-text-primary: rgba(0, 0, 0, 0.88);
   --color-text-secondary: rgba(0, 0, 0, 0.45);
+  /* 功能色 */
   --color-success: #52c41a;
+  --color-primary: #1677ff;
+  --color-warning: #faad14;
+  --color-danger: #ff4d4f;
+  /* 阴影 */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --shadow-header: 0 1px 0 #f0f0f0;
 }
 
 [data-theme='dark'] {
@@ -28,12 +41,20 @@ html, body, #root {
   --color-bg-header: #141414;
   --color-bg-card: #1f1f1f;
   --color-bg-info: #1f1f1f;
+  --color-bg-hover: #262626;
+  --color-bg-row-hover: #111a2c;
   --color-border-base: #303030;
   --color-border-card: #424242;
   --color-border-info: #303030;
   --color-text-primary: rgba(255, 255, 255, 0.85);
   --color-text-secondary: rgba(255, 255, 255, 0.45);
   --color-success: #52c41a;
+  --color-primary: #1677ff;
+  --color-warning: #d48806;
+  --color-danger: #ff4d4f;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-header: 0 1px 0 #303030;
 }
 
 body {
@@ -41,11 +62,125 @@ body {
   transition: background-color 0.3s ease;
 }
 
-/* ============ 交互过渡效果 ============ */
+/* ============ Ant Design Card 卡片优化 ============ */
 .ant-card {
-  transition: box-shadow 0.2s ease;
+  transition: box-shadow 0.25s ease, transform 0.25s ease;
+  box-shadow: var(--shadow-card);
+  border-radius: 10px !important;
 }
 
+.ant-card:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* ============ Ant Design Progress 进度条动画优化 ============ */
 .ant-progress-bg {
-  transition: width 0.5s ease !important;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.ant-progress-status-active .ant-progress-bg {
+  background: linear-gradient(90deg, var(--color-primary), #69b1ff) !important;
+}
+
+/* ============ Ant Design Table 表格行悬停 ============ */
+.ant-table-tbody > tr.ant-table-row {
+  transition: background-color 0.2s ease;
+}
+
+.ant-table-tbody > tr.ant-table-row:hover > td {
+  background: var(--color-bg-row-hover) !important;
+}
+
+/* ============ Ant Design Button 按钮优化 ============ */
+.ant-btn {
+  transition: all 0.2s ease !important;
+}
+
+.ant-btn:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+.ant-btn-primary:not(:disabled):hover {
+  filter: brightness(1.08);
+}
+
+/* ============ Ant Design Switch 开关优化 ============ */
+.ant-switch {
+  transition: all 0.25s ease !important;
+}
+
+/* ============ Ant Design Tag 标签圆角统一 ============ */
+.ant-tag {
+  border-radius: 4px;
+}
+
+/* ============ 自定义滚动条 ============ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ============ Drawer 动画与深色适配 ============ */
+.ant-drawer-content-wrapper {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* 深色模式下 Drawer 关闭按钮使用柔和白色 */
+[data-theme='dark'] .ant-drawer-close {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+[data-theme='dark'] .ant-drawer-close:hover {
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+/* 深色模式下 Drawer 标题文本使用柔和白色 */
+[data-theme='dark'] .ant-drawer-header-title .ant-drawer-title {
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+/* ============ 深色模式 Header 标题配色 ============ */
+/* 强制覆盖 Ant Design Layout Header 背景 */
+[data-theme='dark'] .ant-layout-header {
+  background: #141414 !important;
+}
+
+[data-theme='dark'] .ant-layout-header h1,
+[data-theme='dark'] .ant-layout-header h2,
+[data-theme='dark'] .ant-layout-header h3,
+[data-theme='dark'] .ant-layout-header h4,
+[data-theme='dark'] .ant-layout-header h5,
+[data-theme='dark'] .ant-layout-header .ant-typography {
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+/* ============ 空状态文字优化 ============ */
+.ant-empty-description {
+  color: var(--color-text-secondary) !important;
+}
+
+/* ============ 模态框蒙层优化 ============ */
+.ant-modal-mask {
+  backdrop-filter: blur(2px);
 }

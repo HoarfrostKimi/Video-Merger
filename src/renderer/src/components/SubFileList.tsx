@@ -12,8 +12,8 @@ const SubFileList: React.FC<SubFileListProps> = React.memo(({ selectedFolder }) 
   return (
     <Card
       size="small"
-      style={{ marginBottom: 16 }}
-      title={<Text strong>选中任务的子文件列表</Text>}
+      style={{ marginBottom: 16, borderRadius: 10 }}
+      title={<Text strong style={{ fontSize: 14 }}>选中任务的子文件列表</Text>}
     >
       {selectedFolder ? (
         <div style={{ maxHeight: 150, overflowY: 'auto' }}>

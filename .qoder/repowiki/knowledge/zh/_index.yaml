@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: master
 nodes_managed: true
-exported_at: "2026-07-11T07:36:21Z"
+exported_at: "2026-07-11T08:14:05Z"
 modules:
     "":
-        dir_name: 视频合并应用与 B 站投稿助手根工程
-        title: 视频合并应用与 B 站投稿助手根工程
+        dir_name: 视频合并 App 与 B 站投稿助手 根工程
+        title: 视频合并 App 与 B 站投稿助手 根工程
         scope:
             - .gitignore
             - package.json
@@ -30,8 +30,8 @@ modules:
         depends_on: []
         related_to: []
     app_source:
-        dir_name: Electron 主进程、安全预加载桥与 Vite 渲染层入口
-        title: Electron 主进程、安全预加载桥与 Vite 渲染层入口
+        dir_name: Electron 主进程、安全预加载桥与 Vite 渲染层源码
+        title: Electron 主进程、安全预加载桥与 Vite 渲染层源码
         scope:
             - src/
         source_files: []

@@ -73,14 +73,14 @@ const UploadModal: React.FC<UploadModalProps> = React.memo(({
     <Modal
       title={
         <Space>
-          <UploadOutlined />
+          <UploadOutlined style={{ color: 'var(--color-primary)' }} />
           <span>待投稿文件</span>
           <Tag color="blue">{mergedFiles.length} 个文件</Tag>
         </Space>
       }
       open={visible}
       onCancel={onClose}
-      width={700}
+      width={720}
       footer={
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Space>
@@ -128,7 +128,7 @@ const UploadModal: React.FC<UploadModalProps> = React.memo(({
           onChange: (keys) => onSelectChange(keys)
         }}
         columns={columns}
-        locale={{ emptyText: '暂无已合并文件，请先合并视频' }}
+        locale={{ emptyText: <span style={{ color: 'var(--color-text-secondary)' }}>暂无已合并文件，请先合并视频</span> }}
       />
     </Modal>
   )

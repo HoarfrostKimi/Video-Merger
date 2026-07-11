@@ -75,6 +75,9 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: str
     ipcRenderer.on('config:updated', callback)
     return () => ipcRenderer.removeListener('config:updated', callback)
   },
+
+  // 设置原生主题（影响窗口标题栏颜色）
+  setNativeTheme: (darkMode: boolean) => invokeApi('theme:set', darkMode)
 }
 
 if (process.contextIsolated) {

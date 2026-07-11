@@ -44,6 +44,8 @@ interface Window {
     forceQuit: () => Promise<void>
     // 配置变更监听
     onConfigUpdated: (callback: () => void) => () => void
+    // 设置原生主题
+    setNativeTheme: (darkMode: boolean) => Promise<void>
   }
 }
 

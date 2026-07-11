@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: ""
-title: 视频合并应用与 B 站投稿助手根工程
+title: 视频合并 App 与 B 站投稿助手 根工程
 scope:
     - .gitignore
     - package.json

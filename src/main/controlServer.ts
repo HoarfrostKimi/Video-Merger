@@ -40,6 +40,7 @@ interface AppConfig {
 let controlServer: Server | null = null
 let controlPort = 9820
 let appStatus: 'idle' | 'scanning' | 'merging' | 'uploading' = 'idle'
+let appStatusSince = Date.now() // 记录状态开始时间，用于超时判断
 let mergePercent = 0
 let currentMergeTask = ''
 let mergeTotalTasks = 0
@@ -164,6 +165,12 @@ export function applyExcludeFilter(): void {
   if (loadConfigFn) configRef = loadConfigFn()
   const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
   lastGroups = lastGroups.filter((g) => !hiddenKeys.has(g.key))
+}
+
+/** 获取过滤后的分组列表 */
+function getFilteredGroups(): VideoGroup[] {
+  const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
+  return lastGroups.filter((g) => !hiddenKeys.has(g.key))
 }
 
 /** 获取控制服务器地址 */
@@ -295,6 +302,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     if (uploadDone && appStatus === 'uploading') {
       appStatus = 'idle'
     }
+    // 上传状态超时保护：如果 10 分钟内未完成（浏览器关闭等），自动重置
+    if (appStatus === 'uploading' && !uploadDone && Date.now() - appStatusSince > 10 * 60 * 1000) {
+      console.log('[ControlServer] 上传状态超时，已自动重置')
+      appStatus = 'idle'
+    }
     // 使用缓存的合并文件数量（避免每秒扫描目录）
     const now = Date.now()
     if (now - cachedMergedFilesTime > MERGED_FILES_CACHE_TTL) {
@@ -332,9 +344,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (path === '/api/groups' && method === 'GET') {
     // 应用排除列表过滤（确保手机端始终与桌面端同步）
     if (loadConfigFn) configRef = loadConfigFn()
-    const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
-    const filtered = lastGroups.filter((g) => !hiddenKeys.has(g.key))
-    sendJson(res, 200, { groups: filtered })
+    sendJson(res, 200, { groups: getFilteredGroups() })
     return
   }
 
@@ -350,7 +360,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
     try {
       isScanning = true
-      appStatus = 'scanning'
+      appStatus = 'scanning'; appStatusSince = Date.now()
       if (loadConfigFn) configRef = loadConfigFn()
       const inputFolder = configRef.inputFolder
       const maxInterval = configRef.maxIntervalHours || 2.5
@@ -360,11 +370,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
       lastGroups = await doScan(inputFolder, maxInterval)
-      appStatus = 'idle'
+      // 应用排除列表
+      if (loadConfigFn) configRef = loadConfigFn()
+      const scanHiddenKeys = new Set(configRef.hiddenFolderKeys || [])
+      lastGroups = lastGroups.filter((g) => !scanHiddenKeys.has(g.key))
+      appStatus = 'idle'; appStatusSince = Date.now()
       isScanning = false
       sendJson(res, 200, { groups: lastGroups })
     } catch (e: unknown) {
-      appStatus = 'idle'
+      appStatus = 'idle'; appStatusSince = Date.now()
       isScanning = false
       sendJson(res, 500, { error: String(e) })
     }
@@ -392,7 +406,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
 
-      appStatus = 'merging'
+      appStatus = 'merging'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(true)
       mergePercent = 0
       mergeTotalTasks = 1
@@ -411,7 +425,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       })
       mergePercent = 100
 
-      appStatus = 'idle'
+      appStatus = 'idle'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(false)
       currentMergeTask = ''
       mergeTotalTasks = 0
@@ -426,10 +440,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       if (inputFolder) {
         lastGroups = await doScan(inputFolder, maxInterval)
       }
+      // 合并后重新应用排除列表
+      if (loadConfigFn) configRef = loadConfigFn()
+      const hiddenKeysAfterMerge = new Set(configRef.hiddenFolderKeys || [])
+      lastGroups = lastGroups.filter((g) => !hiddenKeysAfterMerge.has(g.key))
 
       sendJson(res, 200, { success: true, outputPath, groups: lastGroups })
     } catch (e: unknown) {
-      appStatus = 'idle'
+      appStatus = 'idle'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(false)
       currentMergeTask = ''
       mergePercent = 0
@@ -462,7 +480,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       // 重置投稿完成状态（新一轮投稿开始）
       if (resetUploadDoneFn) resetUploadDoneFn()
 
-      appStatus = 'uploading'
+      appStatus = 'uploading'; appStatusSince = Date.now()
       // 记录投稿文件名（展示用手机端）
       uploadFileNames = filePaths.map((f) => basename(f))
 
@@ -486,7 +504,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       // 不立即设回 idle，让手机端能看到投稿进行中
       sendJson(res, 200, { success: true })
     } catch (e: unknown) {
-      appStatus = 'idle'
+      appStatus = 'idle'; appStatusSince = Date.now()
       uploadFileNames = []
       sendJson(res, 500, { error: String(e) })
     }
@@ -496,7 +514,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // POST /api/upload/reset - 手动重置投稿状态
   if (path === '/api/upload/reset' && method === 'POST') {
     if (resetUploadDoneFn) resetUploadDoneFn()
-    appStatus = 'idle'
+    appStatus = 'idle'; appStatusSince = Date.now()
     uploadFileNames = []
     sendJson(res, 200, { success: true })
     return
@@ -621,7 +639,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
 
-      appStatus = 'merging'
+      appStatus = 'merging'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(true)
       const results: string[] = []
       const totalGroups = groupKeys.length
@@ -654,7 +672,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       mergePercent = 100
       mergeCurrentIndex = totalGroups
 
-      appStatus = 'idle'
+      appStatus = 'idle'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(false)
       currentMergeTask = ''
       mergeTotalTasks = 0
@@ -672,7 +690,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       sendJson(res, 200, { success: true, outputPaths: results, groups: lastGroups })
     } catch (e: unknown) {
-      appStatus = 'idle'
+      appStatus = 'idle'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(false)
       currentMergeTask = ''
       mergePercent = 0
@@ -751,76 +769,98 @@ function getMobileHtml(): string {
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>视频合并控制</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#333;padding:12px;padding-bottom:80px}
-.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-.card h3{font-size:15px;margin-bottom:10px;color:#1890ff}
+:root{--primary:#1677ff;--primary-light:#e6f4ff;--success:#52c41a;--success-light:#f6ffed;--warning:#faad14;--warning-light:#fffbe6;--danger:#ff4d4f;--danger-light:#fff1f0;--orange:#fa8c16;--text:#262626;--text-secondary:#8c8c8c;--bg:#f5f5f5;--bg-card:#fff;--border:#f0f0f0;--shadow:0 1px 4px rgba(0,0,0,.08);--shadow-lg:0 4px 16px rgba(0,0,0,.12);--radius:12px;--radius-sm:8px}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);padding:12px;padding-bottom:90px;-webkit-font-smoothing:antialiased}
+/* 卡片 */
+.card{background:var(--bg-card);border-radius:var(--radius);padding:16px;margin-bottom:12px;box-shadow:var(--shadow);transition:box-shadow .25s ease}
+.card:active{box-shadow:var(--shadow-lg)}
+.card h3{font-size:15px;font-weight:600;margin-bottom:12px;color:var(--primary)}
 /* 状态栏 */
-.status-bar{padding:16px;text-align:center}
-.status-text{font-size:18px;font-weight:600;margin-bottom:4px}
-.status-detail{font-size:13px;color:#999;margin-bottom:8px;word-break:break-all}
-.progress-wrap{width:100%;height:12px;background:#e8e8e8;border-radius:6px;overflow:hidden;margin-top:8px}
-.progress-fill{height:100%;background:linear-gradient(90deg,#1890ff,#52c41a);border-radius:6px;transition:width .5s ease}
-.progress-text{font-size:20px;font-weight:700;color:#1890ff;margin-top:6px}
-/* 合并文件提示 */
-.merged-banner{background:#f6ffed;border:1px solid #b7eb8f;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
-.merged-banner .info{font-size:14px;color:#52c41a;font-weight:500}
-.merged-banner .btn{font-size:12px;padding:6px 12px}
+.status-bar{padding:20px 16px;text-align:center}
+.status-text{font-size:20px;font-weight:700;margin-bottom:6px;letter-spacing:.3px}
+.status-detail{font-size:13px;color:var(--text-secondary);margin-bottom:10px;word-break:break-all;line-height:1.5}
+.progress-wrap{width:100%;height:14px;background:#e8e8e8;border-radius:7px;overflow:hidden;margin-top:10px}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--primary),#69b1ff,#52c41a);border-radius:7px;background-size:200% 100%;animation:progressShine 2s ease infinite;transition:width .4s cubic-bezier(.4,0,.2,1)}
+@keyframes progressShine{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.progress-text{font-size:22px;font-weight:700;color:var(--primary);margin-top:6px;letter-spacing:.5px}
 /* 投稿状态 */
-.upload-status{border-radius:8px;padding:12px;margin-top:8px}
-.upload-status.uploading{background:#fff7e6;border:1px solid #ffd591}
-.upload-status.done{background:#f6ffed;border:1px solid #b7eb8f}
-.upload-status .title{font-size:15px;font-weight:600;margin-bottom:4px}
-.upload-status .files{font-size:12px;color:#666;margin-top:6px}
-.upload-status .files div{padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.upload-status{border-radius:var(--radius-sm);padding:14px;margin-top:10px}
+.upload-status.uploading{background:var(--warning-light);border:1px solid #ffd591}
+.upload-status.done{background:var(--success-light);border:1px solid #b7eb8f}
+.upload-status .title{font-size:15px;font-weight:600;margin-bottom:6px}
+.upload-status .files{font-size:12px;color:#666;margin-top:8px}
+.upload-status .files div{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* 分组列表 */
-.group-item{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f0f0f0}
+.group-item{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);transition:background .15s ease;border-radius:4px;margin:0 -4px;padding:12px 4px}
+.group-item:active{background:#f5f5f5}
 .group-item:last-child{border-bottom:none}
-.group-check{margin-right:10px;width:20px;height:20px;flex-shrink:0}
+.group-check{margin-right:12px;width:22px;height:22px;flex-shrink:0;accent-color:var(--primary);cursor:pointer}
 .group-info{flex:1;min-width:0}
-.group-name{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.group-meta{font-size:12px;color:#999;margin-top:2px}
-.btn{display:inline-block;padding:8px 14px;border-radius:8px;border:none;font-size:13px;font-weight:500;cursor:pointer;transition:opacity .2s}
-.btn:active{opacity:.7}
-.btn-primary{background:#1890ff;color:#fff}
-.btn-success{background:#52c41a;color:#fff}
-.btn-warning{background:#faad14;color:#fff}
-.btn-danger{background:#ff4d4f;color:#fff}
-.btn-ghost{background:#f0f0f0;color:#333}
-.btn-block{display:block;width:100%;text-align:center;padding:12px}
-.btn:disabled{opacity:.5;cursor:not-allowed}
-.bottom-bar{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:10px 12px;display:flex;gap:6px;box-shadow:0 -1px 3px rgba(0,0,0,.1);z-index:10;flex-wrap:wrap}
-.bottom-bar .btn{flex:1;min-width:0;font-size:12px;padding:10px 6px}
-.empty{text-align:center;padding:40px 20px;color:#999}
-.toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.8);color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;z-index:100;display:none}
-.tab-bar{display:flex;gap:0;margin-bottom:12px;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-.tab{flex:1;text-align:center;padding:12px 8px;font-size:14px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;color:#666}
-.tab.active{color:#1890ff;border-bottom-color:#1890ff;background:#e6f7ff}
-.login-box{max-width:320px;margin:60px auto;text-align:center}
-.login-box input{width:100%;padding:12px;border:1px solid #d9d9d9;border-radius:8px;font-size:16px;margin:16px 0}
-.login-box .btn{width:100%;padding:12px;font-size:16px}
-.hidden{display:none}
-.section-title{font-size:13px;color:#999;margin:12px 0 8px;padding-left:4px}
-.setting-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f5f5f5}
-.setting-row label{font-size:14px;flex:1}
-.setting-row input,.setting-row select{padding:6px 10px;border:1px solid #d9d9d9;border-radius:6px;font-size:14px;width:120px}
-.excluded-item{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f0f0f0}
+.group-name{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
+.group-meta{font-size:12px;color:var(--text-secondary);margin-top:4px}
+/* 按钮 */
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;border-radius:var(--radius-sm);border:none;font-size:14px;font-weight:500;cursor:pointer;transition:all .2s ease;min-height:44px;-webkit-user-select:none;user-select:none}
+.btn:active{transform:scale(.96);opacity:.85}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:active{background:#0958d9}
+.btn-success{background:var(--success);color:#fff}
+.btn-success:active{background:#389e0d}
+.btn-warning{background:var(--warning);color:#fff}
+.btn-warning:active{background:#d48806}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-danger:active{background:#cf1322}
+.btn-ghost{background:#f0f0f0;color:var(--text)}
+.btn-ghost:active{background:#d9d9d9}
+.btn-block{display:flex;width:100%;text-align:center;padding:14px;font-size:15px}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none!important}
+/* 底部栏 */
+.bottom-bar{position:fixed;bottom:0;left:0;right:0;background:var(--bg-card);padding:10px 12px;padding-bottom:calc(10px + env(safe-area-inset-bottom,0));display:flex;gap:8px;box-shadow:0 -2px 8px rgba(0,0,0,.08);z-index:10;flex-wrap:wrap;border-top:1px solid var(--border)}
+.bottom-bar .btn{flex:1;min-width:0;font-size:13px;padding:10px 8px;min-height:44px}
+/* 空状态 */
+.empty{text-align:center;padding:48px 20px;color:var(--text-secondary);font-size:14px;line-height:1.6}
+/* Toast */
+.toast{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-20px);background:rgba(0,0,0,.8);color:#fff;padding:12px 24px;border-radius:var(--radius-sm);font-size:14px;z-index:100;opacity:0;transition:all .3s ease;pointer-events:none;white-space:nowrap;backdrop-filter:blur(8px)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* Tab栏 */
+.tab-bar{display:flex;gap:0;margin-bottom:12px;background:var(--bg-card);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);border:1px solid var(--border)}
+.tab{flex:1;text-align:center;padding:12px 6px;font-size:13px;font-weight:500;cursor:pointer;color:var(--text-secondary);transition:all .25s ease;position:relative}
+.tab:active{background:#f5f5f5}
+.tab.active{color:var(--primary);background:var(--primary-light);font-weight:600}
+/* 登录页 */
+.login-box{max-width:340px;margin:80px auto;text-align:center}
+.login-box .card{padding:32px 24px}
+.login-box input{width:100%;padding:14px 16px;border:1.5px solid #d9d9d9;border-radius:var(--radius-sm);font-size:16px;margin:16px 0;transition:border-color .25s ease;outline:none}
+.login-box input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,119,255,.15)}
+.login-box .btn{width:100%;padding:14px;font-size:16px;min-height:48px}
+.hidden{display:none!important}
+.section-title{font-size:13px;color:var(--text-secondary);margin:16px 0 10px;padding-left:4px;font-weight:500}
+.setting-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #f5f5f5;min-height:48px}
+.setting-row label{font-size:14px;flex:1;margin-right:12px;color:var(--text)}
+.setting-row input,.setting-row select{padding:8px 12px;border:1.5px solid #d9d9d9;border-radius:6px;font-size:14px;width:120px;outline:none;transition:border-color .2s}
+.setting-row input:focus,.setting-row select:focus{border-color:var(--primary)}
+.excluded-item{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)}
+.excluded-item:last-child{border-bottom:none}
 /* 状态颜色 */
-.status-idle .status-text{color:#52c41a}
-.status-scanning .status-text{color:#1890ff}
-.status-merging .status-text{color:#fa8c16}
-.status-uploading .status-text{color:#faad14}
-.status-done .status-text{color:#52c41a}
+.status-idle .status-text{color:var(--success)}
+.status-scanning .status-text{color:var(--primary)}
+.status-merging .status-text{color:var(--orange)}
+.status-uploading .status-text{color:var(--warning)}
+.status-done .status-text{color:var(--success)}
 /* 动画 */
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.pulse{animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.pulse{animation:pulse 1.5s ease-in-out infinite}
 /* 断线提示条 */
-.disconnect-banner{background:#fff1f0;border:1px solid #ffa39e;border-radius:8px;padding:10px 14px;margin-bottom:12px;text-align:center;color:#cf1322;font-size:14px;font-weight:500;display:none}
+.disconnect-banner{background:var(--danger-light);border:1px solid #ffa39e;border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:12px;text-align:center;color:#cf1322;font-size:14px;font-weight:600;display:none;line-height:1.5}
 /* 排障提示 */
-.net-tips{background:#fffbe6;border:1px solid #ffe58f;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#614700}
-.net-tips summary{cursor:pointer;font-weight:500;outline:none}
+.net-tips{background:var(--warning-light);border:1px solid #ffe58f;border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:12px;font-size:13px;color:#614700;line-height:1.6}
+.net-tips summary{cursor:pointer;font-weight:600;outline:none;padding:2px 0}
 .net-tips ul{margin:8px 0 0 18px;padding:0}
-.net-tips li{margin:4px 0}
+.net-tips li{margin:6px 0}
+/* 手机视频上传区 */
+.upload-zone{padding:24px 16px;text-align:center;border:2px dashed #d9d9d9;border-radius:var(--radius);margin:12px 0;transition:border-color .25s ease;background:#fafafa}
+.upload-zone:active{border-color:var(--primary);background:var(--primary-light)}
+.upload-zone p{color:var(--text-secondary);margin-bottom:16px;font-size:14px;line-height:1.5}
 </style>
 </head>
 <body>
@@ -868,11 +908,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
     <div id="uploadStatusArea"></div>
   </div>
 
-  <!-- 已合并文件提示 -->
-  <div id="mergedBanner" class="merged-banner hidden">
-    <div class="info" id="mergedInfo">已合并 0 个文件</div>
-    <button class="btn btn-success" onclick="doUpload()" id="bannerUploadBtn">投稿</button>
-  </div>
+  <!-- 已合并文件提示（已移除） -->
 
   <!-- 分组列表 -->
   <div id="tabGroups">
@@ -911,10 +947,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 
   <!-- 手机视频 -->
   <div id="tabPhone" class="hidden">
-    <div style="padding:16px; text-align:center; border:2px dashed #d9d9d9; border-radius:8px; margin:12px;">
-      <p style="color:#666; margin-bottom:12px;">选择手机上的视频文件，上传到电脑</p>
-      <input type="file" id="videoFileInput" accept="video/*" multiple style="display:none" onchange="handleVideoSelect(this)">
-      <button onclick="document.getElementById('videoFileInput').click()" style="background:#1677ff; color:white; border:none; padding:10px 24px; border-radius:6px; font-size:16px; cursor:pointer;">📁 选择视频文件</button>
+    <div class="upload-zone">
+      <p>选择手机上的视频文件，上传到电脑</p>
+      <input type="file" id="videoFileInput" accept="video/*" multiple style="position:absolute;opacity:0;width:0;height:0;overflow:hidden;pointer-events:none" onchange="handleVideoSelect(this)">
+      <label for="videoFileInput" style="background:var(--primary);color:white;border:none;padding:12px 28px;border-radius:8px;font-size:16px;cursor:pointer;font-weight:500;min-height:48px;display:inline-block;">📁 选择视频文件</label>
     </div>
     <div id="selectedVideoList" style="padding:0 12px;"></div>
     <div id="uploadAction" style="display:none; padding:12px; text-align:center;">
@@ -930,10 +966,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 </div>
 
 <div class="bottom-bar" id="bottomBar">
-  <button class="btn btn-primary" id="scanBtn" onclick="doScan()">扫描</button>
-  <button class="btn btn-success" id="batchMergeBtn" onclick="doBatchMerge()" disabled>批量合并</button>
-  <button class="btn btn-warning" id="excludeBtn" onclick="doExclude()" disabled>排除</button>
-  <button class="btn btn-ghost" id="uploadBtn" onclick="doUpload()" disabled>投稿</button>
+  <button class="btn btn-primary" id="scanBtn" onclick="doScan()">📡 扫描</button>
+  <button class="btn btn-success" id="batchMergeBtn" onclick="doBatchMerge()" disabled>⚡ 批量合并</button>
+  <button class="btn btn-warning" id="mergeUploadBtn" onclick="doMergeAndUpload()" disabled>📤 合并投稿</button>
 </div>
 
 <script>
@@ -946,8 +981,9 @@ let pollFailCount = 0;
 
 function toast(msg) {
   const t = document.getElementById('toast');
-  t.textContent = msg; t.style.display = 'block';
-  setTimeout(() => t.style.display = 'none', 2500);
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2500);
 }
 
 // HTML 转义（防止 XSS 攻击）
@@ -1056,7 +1092,7 @@ async function updateStatus() {
 
     // 同步投稿文件名列表
     if (data.uploadFileNames) uploadFileNames = data.uploadFileNames;
-    updateMergedBanner(data.mergedFilesCount);
+    // 已移除 mergedBanner 更新
 
     // 状态显示
     card.className = 'card status-bar';
@@ -1131,13 +1167,7 @@ async function updateStatus() {
     prevStatus = data.status;
     lastStatus = data.status; // 更新全局状态用于智能轮询
 
-    // 更新底部栏投稿按钮状态
-    var uploadBtn = document.getElementById('uploadBtn');
-    if (data.mergedFilesCount > 0 && data.status === 'idle') {
-      uploadBtn.disabled = false;
-    } else {
-      uploadBtn.disabled = true;
-    }
+    // 底部按钮状态由 renderGroups 和 updateBatchBtn 管理
     pollFailCount = 0;
     var dbanner = document.getElementById('disconnectBanner');
     if (dbanner) dbanner.style.display = 'none';
@@ -1148,17 +1178,6 @@ async function updateStatus() {
   }
 }
 
-// === 合并文件提示条 ===
-function updateMergedBanner(count) {
-  var banner = document.getElementById('mergedBanner');
-  var info = document.getElementById('mergedInfo');
-  if (count > 0) {
-    banner.classList.remove('hidden');
-    info.textContent = '已合并 ' + count + ' 个文件，可投稿';
-  } else {
-    banner.classList.add('hidden');
-  }
-}
 
 // === 扫描 ===
 async function doScan() {
@@ -1200,8 +1219,9 @@ function toggleSelectAll() {
   renderGroups(); updateBatchBtn();
 }
 function updateBatchBtn() {
-  document.getElementById('batchMergeBtn').disabled = selectedKeys.size === 0;
-  document.getElementById('excludeBtn').disabled = selectedKeys.size === 0;
+  const hasSelection = selectedKeys.size > 0
+  document.getElementById('batchMergeBtn').disabled = !hasSelection
+  document.getElementById('mergeUploadBtn').disabled = !hasSelection
 }
 
 // === 合并 ===
@@ -1226,6 +1246,38 @@ async function doBatchMerge() {
     groups = data.groups || []; selectedKeys.clear(); renderGroups(); updateBatchBtn();
     toast('批量合并完成！');
   } catch (e) { toast('批量合并失败'); }
+}
+
+// 合并并跳转到投稿页
+async function doMergeAndUpload() {
+  if (selectedKeys.size === 0) { toast('请先选择分组'); return; }
+  if (!confirm('确定合并 ' + selectedKeys.size + ' 个分组并投稿？')) return;
+
+  // 先加载已有文件，记录合并前的文件名
+  await loadMergedFiles();
+  var oldNames = new Set(serverMergedFiles.map(function(f) { return f.name; }));
+
+  toast('正在合并...');
+  try {
+    const data = await api('POST', '/api/merge/batch', { groupKeys: Array.from(selectedKeys) });
+    if (data.error) { toast(data.error); return; }
+    groups = data.groups || []; selectedKeys.clear(); renderGroups(); updateBatchBtn();
+
+    // 合并完成后，重新加载已合并文件
+    await loadMergedFiles();
+
+    // 只筛选本次合并新增的文件
+    var newFiles = serverMergedFiles.filter(function(f) { return !oldNames.has(f.name); });
+    if (newFiles.length === 0) { toast('没有新增文件可投稿'); return; }
+
+    // 自动投稿新增文件
+    toast('正在投稿 ' + newFiles.length + ' 个文件...');
+    var uploadRes = await api('POST', '/api/upload', { fileNames: newFiles.map(function(f) { return f.name; }) });
+    if (uploadRes && uploadRes.error) { toast(uploadRes.error); return; }
+    toast('已打开B站投稿页面');
+    switchTab('upload');
+    await loadMergedFiles();
+  } catch (e) { toast('操作失败'); }
 }
 
 // === 排除/恢复 ===

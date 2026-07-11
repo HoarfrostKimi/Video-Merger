@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Layout, Button, Space, Tag, message, Typography, Badge, Empty, Progress, Card } from 'antd'
+import { Layout, Button, Space, Tag, message, Typography, Empty, Progress, Card } from 'antd'
 import { MergeCellsOutlined, BulbOutlined, BulbFilled, SettingOutlined, UploadOutlined } from '@ant-design/icons'
 import SettingsDrawer from './SettingsDrawer'
 import FolderToolbar from '../components/FolderToolbar'
@@ -502,19 +502,24 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       <Header
         style={{
           background: 'var(--color-bg-header)',
-          padding: '0 24px',
+          padding: '0 28px',
           display: 'flex',
           alignItems: 'center',
+          height: 56,
           borderBottom: '1px solid var(--color-border-base)',
-          transition: 'background-color 0.3s ease'
+          boxShadow: 'var(--shadow-header)',
+          transition: 'background-color 0.3s ease, border-color 0.3s ease',
+          position: 'sticky',
+          top: 0,
+          zIndex: 10
         }}
       >
-        <Title level={3} style={{ margin: 0 }}>
-          <MergeCellsOutlined /> 视频自动合并工具
+        <Title level={4} style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <MergeCellsOutlined style={{ fontSize: 22, color: 'var(--color-primary)' }} /> 视频自动合并工具
         </Title>
         <Tag color="green" style={{ marginLeft: 16 }}>FFmpeg 就绪</Tag>
         <div style={{ flex: 1 }} />
-        <Badge count={mergedFiles.length} size="small">
+        <Space size={8}>
           <Button
             icon={<UploadOutlined />}
             onClick={() => {
@@ -525,22 +530,22 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           >
             投稿
           </Button>
-        </Badge>
-        <Button
-          icon={<SettingOutlined />}
-          onClick={() => setShowSettings(true)}
-          title="设置"
-        />
-        <Button
-          icon={darkMode ? <BulbFilled /> : <BulbOutlined />}
-          onClick={() => onToggleDarkMode(!darkMode)}
-          title={darkMode ? '切换到浅色模式' : '切换到深色模式'}
-        >
-          {darkMode ? '深色' : '浅色'}
-        </Button>
+          <Button
+            icon={<SettingOutlined />}
+            onClick={() => setShowSettings(true)}
+            title="设置"
+          />
+          <Button
+            icon={darkMode ? <BulbFilled style={{ color: '#faad14' }} /> : <BulbOutlined />}
+            onClick={() => onToggleDarkMode(!darkMode)}
+            title={darkMode ? '切换到浅色模式' : '切换到深色模式'}
+          >
+            {darkMode ? '深色' : '浅色'}
+          </Button>
+        </Space>
       </Header>
 
-      <Content style={{ padding: 24 }}>
+      <Content style={{ padding: '24px 28px', overflow: 'auto' }}>
         <FolderToolbar
           inputFolder={inputFolder}
           outputFolder={outputFolder}
@@ -596,7 +601,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
-                <span>
+                <span style={{ color: 'var(--color-text-secondary)' }}>
                   {inputFolder ? '未发现待合并的视频分组，请检查目录或调整设置' : '请选择视频文件所在目录，点击扫描开始'}
                 </span>
               }

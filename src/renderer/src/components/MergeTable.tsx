@@ -87,10 +87,10 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
   return (
     <Card
       size="small"
-      style={{ marginBottom: 16 }}
+      style={{ marginBottom: 16, borderRadius: 10 }}
       title={
         <Space>
-          <Text strong>待合并视频</Text>
+          <Text strong style={{ fontSize: 14 }}>待合并视频</Text>
           <Tag color="green">发现 {folders.length} 组待合并，共 {folders.reduce((s, f) => s + f.fileCount, 0)} 个片段</Tag>
         </Space>
       }
