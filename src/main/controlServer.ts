@@ -1205,6 +1205,7 @@ function renderGroups() {
         '<div class="group-name">' + escHtml(g.folderName) + '</div>' +
         '<div class="group-meta">' + g.fileCount + ' 个文件 | ' + sizeMB + ' MB</div>' +
       '</div>' +
+      '<button class="btn btn-danger" onclick="doExcludeSingle(\\'' + g.key + '\\')" style="flex-shrink:0;margin-left:8px;font-size:12px;padding:6px 10px;min-height:auto">排除</button>' +
     '</div>';
   }).join('');
 }
@@ -1281,6 +1282,16 @@ async function doMergeAndUpload() {
 }
 
 // === 排除/恢复 ===
+async function doExcludeSingle(key) {
+  if (!confirm('确定排除此分组？')) return;
+  try {
+    const data = await api('POST', '/api/groups/exclude', { keys: [key] });
+    if (data.error) { toast(data.error); return; }
+    groups = data.groups || []; selectedKeys.clear(); renderGroups(); updateBatchBtn();
+    toast('已排除');
+  } catch (e) { toast('排除失败'); }
+}
+
 async function doExclude() {
   if (selectedKeys.size === 0) { toast('请先选择分组'); return; }
   if (!confirm('确定排除 ' + selectedKeys.size + ' 个分组？')) return;
