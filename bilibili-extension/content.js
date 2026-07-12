@@ -49,12 +49,35 @@
     })
   }
 
+  /** 等待 DOM 中出现包含指定文本的可见元素 */
+  function waitForElementByText(keyword, timeout = 60000) {
+    const check = () => {
+      for (const el of document.querySelectorAll('*')) {
+        const text = el.textContent || ''
+        if (text.includes(keyword) && text.length < 200) {
+          const rect = el.getBoundingClientRect()
+          if (rect.width > 100 && rect.height > 30) return el
+        }
+      }
+      return null
+    }
+    const existing = check()
+    if (existing) return Promise.resolve(existing)
+    return new Promise((resolve, reject) => {
+      const obs = new MutationObserver(() => {
+        const el = check()
+        if (el) { obs.disconnect(); resolve(el) }
+      })
+      obs.observe(document.body, { childList: true, subtree: true })
+      setTimeout(() => { obs.disconnect(); reject(new Error(`等待「${keyword}」超时`)) }, timeout)
+    })
+  }
+
   /** 查找B站上传页面的文件输入框 */
   function findFileInput() {
     const selectors = [
       'input[type="file"][accept*="video"]',
       'input[type="file"][accept*="mp4"]',
-      'input[type="file"][accept*="video/"]',
       '.upload-area input[type="file"]',
       '[class*="upload"] input[type="file"]',
       '[class*="drop"] input[type="file"]',
@@ -88,19 +111,7 @@
         }
       }
     }
-    if (bestMatch) return toClickable(bestMatch)
-
-    // 第二轮：找 textContent 精确匹配的最小元素
-    let smallest = null
-    for (const el of all) {
-      if (el.textContent.trim() === text) {
-        if (!smallest || el.childElementCount < smallest.childElementCount) {
-          smallest = el
-        }
-      }
-    }
-    if (smallest) return toClickable(smallest)
-    return null
+    return bestMatch ? toClickable(bestMatch) : null
   }
 
   /** 从文本元素向上找到可点击的父元素 */
@@ -190,51 +201,37 @@
   async function stepSetDeclaration(onLog) {
     onLog('设置创作声明...')
 
-    // 找到包含"创作声明"标签的表单行中的 select 组件
-    const labels = document.querySelectorAll('span, label, div')
-    let targetSelect = null
-    for (const label of labels) {
+    /** 打开 select 并点击目标选项 */
+    async function trySelectDeclaration(selectEl) {
+      const trigger = selectEl.querySelector('.el-select__wrapper, .el-input__inner')
+      if (!trigger) return false
+      trigger.click()
+      await sleep(500)
+      return clickDropdownOption('内容无需标注')
+    }
+
+    // 主方案：通过"创作声明"标签文本精确定位
+    for (const label of document.querySelectorAll('span, label, div')) {
       if (label.textContent.trim() === '创作声明') {
         const parent = label.closest('.el-form-item, tr, [class*="row"], [class*="item"]') || label.parentElement
-        targetSelect = parent?.querySelector('.el-select, select, [class*="select"]')
+        const targetSelect = parent?.querySelector('.el-select, select, [class*="select"]')
+        if (targetSelect && await trySelectDeclaration(targetSelect)) {
+          return onLog('创作声明已设置为「内容无需标注」')
+        }
         break
       }
     }
 
-    if (targetSelect) {
-      // 点击打开下拉框
-      const selectTrigger = targetSelect.querySelector('.el-select__wrapper, .el-input__inner, .el-select')
-      if (selectTrigger) {
-        selectTrigger.click()
-        await sleep(500)
-
-        // 在下拉选项中查找「内容无需标注」
-        const found = clickDropdownOption('内容无需标注')
-        if (found) {
-          onLog('创作声明已设置为「内容无需标注」')
-        } else {
-          onLog('提示: 未找到「内容无需标注」选项，可能已默认选中')
+    // 备用方案：遍历所有 el-select，找到关联"创作声明"的那一个
+    for (const sel of document.querySelectorAll('.el-select')) {
+      if (sel.closest('.el-form-item')?.textContent.includes('创作声明')) {
+        if (await trySelectDeclaration(sel)) {
+          return onLog('创作声明已设置为「内容无需标注」（备用方案）')
         }
       }
-    } else {
-      // 备用方案：直接查找页面上所有 el-select，找到包含创作声明的那个
-      onLog('提示: 未精确定位创作声明，尝试备用方案...')
-      const allSelects = document.querySelectorAll('.el-select')
-      for (const sel of allSelects) {
-        const wrapper = sel.closest('.el-form-item')
-        if (wrapper && wrapper.textContent.includes('创作声明')) {
-          const trigger = sel.querySelector('.el-select__wrapper, .el-input__inner')
-          if (trigger) {
-            trigger.click()
-            await sleep(500)
-            clickDropdownOption('内容无需标注')
-            onLog('创作声明已设置（备用方案）')
-            return
-          }
-        }
-      }
-      onLog('提示: 创作声明可能已默认为「内容无需标注」，跳过')
     }
+
+    onLog('提示: 创作声明可能已默认为「内容无需标注」，跳过')
   }
 
   /**
@@ -351,6 +348,98 @@
     })
   }
 
+  /** 提取为顶层工具：设置文件到 input（浏览器原生 setter，兼容 Vue） */
+  function setFileToInput(input, file) {
+    const dt = new DataTransfer()
+    dt.items.add(file)
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files').set
+    if (nativeSetter) {
+      nativeSetter.call(input, dt.files)
+    } else {
+      input.files = dt.files
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+  }
+
+  /** 在指定 scope 内按直接文本节点查找可点击元素 */
+  function findButtonInScope(text, scope) {
+    const all = scope.querySelectorAll('*')
+    let bestMatch = null
+    for (const el of all) {
+      const directText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === 3)
+        .map(n => n.textContent)
+        .join('')
+        .trim()
+      if (directText === text) {
+        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
+          bestMatch = el
+        }
+      }
+    }
+    return bestMatch ? toClickable(bestMatch) : null
+  }
+
+  /** 点击「完成」按钮并等待封面弹窗关闭 */
+  async function confirmCoverDialog(onLog) {
+    // 在当前 DOM 中找到封面弹窗（限缩小查找范围）
+    const dialog = document.querySelector(
+      '.el-dialog__wrapper:not([style*="display: none"]), ' +
+      '[class*="coverDialog"]:not([style*="display: none"]), ' +
+      '[class*="cover-maker"]:not([style*="display: none"])'
+    )
+    const scope = dialog || document
+
+    await sleep(1500)
+
+    // 在弹窗范围内查找「完成」按钮
+    const doneBtn = findButtonInScope('完成', scope)
+    if (doneBtn) {
+      // 使用 dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
+      const rect = doneBtn.getBoundingClientRect()
+      doneBtn.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2
+      }))
+      onLog('封面设置完成')
+
+      // 验证弹窗是否真的关闭了（最多等 5 秒）
+      if (dialog) {
+        await new Promise((resolve) => {
+          let tries = 0
+          const check = () => {
+            tries++
+            if (!document.body.contains(dialog) || tries > 20) resolve()
+            else setTimeout(check, 250)
+          }
+          check()
+        })
+        if (document.body.contains(dialog)) {
+          onLog('警告: 封面弹窗似乎未关闭，将重试...')
+          await sleep(500)
+          // 重试一次
+          const retryBtn = findButtonInScope('完成', dialog)
+          if (retryBtn) {
+            const r = retryBtn.getBoundingClientRect()
+            retryBtn.dispatchEvent(new MouseEvent('click', {
+              bubbles: true, cancelable: true, view: window,
+              clientX: r.left + r.width / 2, clientY: r.top + r.height / 2
+            }))
+            await sleep(1000)
+          }
+        }
+      }
+    } else {
+      onLog('提示: 未找到完成按钮')
+      // 备用方案：全页面查找
+      const fallback = findButtonByText('完成')
+      if (fallback) { fallback.click(); onLog('（备用方案）封面设置完成') }
+    }
+    await sleep(500)
+  }
+
   /**
    * Step 5: 设置封面
    * @param {boolean} skipUpload - 第一个视频跳过截帧上传，直接点完成（B站自动推荐封面）
@@ -358,180 +447,107 @@
   async function stepSetCover(file, onLog, skipUpload) {
     onLog('设置封面...')
 
-    // 方式1: 通过文本查找「封面设置」按钮
+    // ---- 1. 找到封面设置按钮 ----
     let coverBtn = findButtonByText('封面设置')
-
-    // 方式2: 通过页面结构定位
     if (!coverBtn) {
       onLog('尝试通过页面结构定位封面区域...')
-      const allEls = document.querySelectorAll('*')
-      for (const el of allEls) {
+      for (const el of document.querySelectorAll('*')) {
         const directText = Array.from(el.childNodes)
-          .filter(n => n.nodeType === 3)
-          .map(n => n.textContent)
-          .join('')
-          .trim()
-        if (directText === '封面' || directText === '* 封面') {
-          const parent = el.closest('.el-form-item') || el.parentElement
-          if (parent) {
-            const clickable = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]')
-            if (clickable) { coverBtn = clickable; break }
-            const items = parent.querySelectorAll('*')
-            for (const item of items) {
-              if (item.textContent.includes('封面设置')) { coverBtn = item; break }
-            }
-          }
-          break
+          .filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+        if (directText !== '封面' && directText !== '* 封面') continue
+        const parent = el.closest('.el-form-item') || el.parentElement
+        if (!parent) break
+        coverBtn = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]')
+        if (coverBtn) break
+        for (const item of parent.querySelectorAll('*')) {
+          if (item.textContent.includes('封面设置')) { coverBtn = item; break }
         }
+        break
       }
     }
 
     if (!coverBtn) {
-      onLog('提示: 未找到封面设置按钮，跳过')
-      await sleep(500)
-      return
+      onLog('提示: 未找到封面设置按钮，跳过'); await sleep(500); return
     }
 
-    // 点击封面按钮打开弹窗
+    // ---- 2. 点击打开弹窗 ----
     const rect = coverBtn.getBoundingClientRect()
     coverBtn.dispatchEvent(new MouseEvent('click', {
       bubbles: true, cancelable: true, view: window,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2
+      clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
     }))
     onLog('已点击封面设置，等待弹窗...')
 
-    // 等待弹窗出现
+    // ---- 3. 等待弹窗出现 ----
     const dialog = await new Promise((resolve) => {
-      const check = () => {
-        return document.querySelector(
-          '.el-dialog__wrapper, .el-dialog, ' +
-          '[class*="dialog"]:not([style*="display: none"]), ' +
-          '[class*="modal"]:not([style*="display: none"]), ' +
-          '[class*="coverMaker"], [class*="cover-maker"], [class*="coverDialog"]'
-        )
-      }
+      const check = () => document.querySelector(
+        '.el-dialog__wrapper, .el-dialog, ' +
+        '[class*="dialog"]:not([style*="display: none"]), ' +
+        '[class*="modal"]:not([style*="display: none"]), ' +
+        '[class*="coverMaker"], [class*="cover-maker"], [class*="coverDialog"]'
+      )
       const existing = check()
       if (existing) return resolve(existing)
-      const obs = new MutationObserver(() => {
-        const d = check()
-        if (d) { obs.disconnect(); resolve(d) }
-      })
+      const obs = new MutationObserver(() => { const d = check(); if (d) { obs.disconnect(); resolve(d) } })
       obs.observe(document.body, { childList: true, subtree: true })
       setTimeout(() => { obs.disconnect(); resolve(null) }, 10000)
     })
 
     if (!dialog) {
-      onLog('提示: 封面弹窗未出现，跳过')
-      await sleep(500)
-      return
+      onLog('提示: 封面弹窗未出现，跳过'); await sleep(500); return
     }
     onLog('封面弹窗已打开')
 
+    // ---- 4. 根据 skipUpload 走不同分支 ----
     if (skipUpload) {
-      // 第一个视频：B站自动推荐封面，直接点完成
       onLog('第一个视频，使用系统推荐封面，直接完成')
-      await sleep(1500)
-      const doneBtn = findButtonByText('完成')
-      if (doneBtn) { doneBtn.click(); onLog('封面设置完成') }
-      else onLog('提示: 未找到完成按钮')
-      await sleep(500)
+      await confirmCoverDialog(onLog)
       return
     }
 
-    // 截帧（第二个及以后的视频才需要）
+    // ---- 5. 截帧 ----
     let frameBlob
     try {
       frameBlob = await captureFrameFromFile(file)
       onLog('视频截帧成功')
     } catch (err) {
       onLog(`提示: 截帧失败(${err.message})，请手动选择封面`)
-      await sleep(1500)
-      const doneBtn = findButtonByText('完成')
-      if (doneBtn) doneBtn.click()
+      await confirmCoverDialog(onLog)
       return
     }
 
     const coverFile = new File([frameBlob], 'cover.jpg', { type: 'image/jpeg' })
     onLog(`封面文件: ${coverFile.name}, ${(coverFile.size / 1024).toFixed(0)}KB`)
 
-    // 设置文件到输入框（使用浏览器原生 setter）
-    function setFileToInput(input, file) {
-      const dt = new DataTransfer()
-      dt.items.add(file)
-      // 使用 HTMLInputElement 原生的 files setter，绕过任何自定义属性定义
-      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files').set
-      if (nativeSetter) {
-        nativeSetter.call(input, dt.files)
-      } else {
-        input.files = dt.files
-      }
-      input.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
-      input.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
-    }
-
-    // 递归查找所有文件输入框（包括 shadow DOM 内）
-    function findAllFileInputs(root) {
-      const inputs = []
-      // 查找当前层的 input[type="file"]
-      const directInputs = root.querySelectorAll ? root.querySelectorAll('input[type="file"]') : []
-      directInputs.forEach(inp => inputs.push(inp))
-      // 递归查找 shadow DOM
-      root.querySelectorAll ? root.querySelectorAll('*').forEach(el => {
-        if (el.shadowRoot) {
-          inputs.push(...findAllFileInputs(el.shadowRoot))
-        }
-      }) : null
-      return inputs
-    }
-
-    // 找底部「上传封面」区域并点击
+    // ---- 6. 找到封面上传区域并注入文件 ----
     await sleep(2000)
-
-    // 找同时包含"上传封面"和"拖拽图片"的元素（底部那个区域）
     const uploadArea = Array.from(document.querySelectorAll('*')).find(el => {
       const text = el.textContent
       return text.includes('上传封面') && text.includes('拖拽图片') && el.children.length <= 5
     })
 
-    if (uploadArea) {
-      onLog('找到上传封面区域')
-    }
-
     if (!uploadArea) {
       onLog('提示: 未找到上传区域，请手动上传')
-      await sleep(1500)
-      const doneBtn = findButtonByText('完成')
-      if (doneBtn) doneBtn.click()
+      await confirmCoverDialog(onLog)
       return
     }
+    onLog('找到上传封面区域')
 
-    // 在整个页面查找 accept 包含 image 的 file input（封面专用 input）
-    // 从 DOM 分析得知：封面 input 的 accept="image/png, image/jpeg"，display:none
-    // 它位于 cover-editor-panel > bcc-upload cover-upload > bcc-upload-wrapper > input
     const allInputs = document.querySelectorAll('input[type="file"]')
-    const coverInput = Array.from(allInputs).find(inp => {
-      const accept = (inp.getAttribute('accept') || '').toLowerCase()
-      return accept.includes('image')
-    })
+    const coverInput = Array.from(allInputs).find(inp => (inp.getAttribute('accept') || '').toLowerCase().includes('image'))
 
     if (!coverInput) {
       onLog('提示: 未找到封面 input (accept 含 image)，请手动上传')
-      await sleep(1500)
-      const doneBtn = findButtonByText('完成')
-      if (doneBtn) doneBtn.click()
+      await confirmCoverDialog(onLog)
       return
     }
 
     onLog(`找到封面 input: accept="${coverInput.getAttribute('accept')}"`)
-
-    // 直接设置文件到封面 input
     setFileToInput(coverInput, coverFile)
     onLog('已设置封面文件')
 
-    // 等待 Vue 组件处理文件并上传
+    // ---- 7. 等待上传并确认 ----
     await sleep(5000)
-
     const hasPreview = document.querySelector('img[src*="blob:"], img[src*="http"], canvas, img[src*="data:"]')
     if (hasPreview) {
       onLog('封面上传成功，预览图已显示')
@@ -539,12 +555,7 @@
       onLog('警告: 未检测到封面预览')
     }
 
-    await sleep(1500)
-
-    const doneBtn = findButtonByText('完成')
-    if (doneBtn) { doneBtn.click(); onLog('封面设置完成') }
-    else onLog('提示: 未找到完成按钮')
-    await sleep(500)
+    await confirmCoverDialog(onLog)
   }
 
   /**
@@ -597,124 +608,7 @@
     return { title, success: true }
   }
 
-  /**
-   * 通过"添加分P"按钮上传文件（用于多P投稿）
-   */
-  async function uploadViaAddPart(file, onLog) {
-    onLog('正在添加分P...')
-
-    // 找"添加分P"按钮并点击
-    const addPartBtn = findButtonByText('添加分P') || findButtonByText('+ 添加分P')
-    if (addPartBtn) {
-      addPartBtn.click()
-      onLog('已点击添加分P，等待文件输入框...')
-      await sleep(2000)
-    }
-
-    // 直接找 bcc-upload-wrapper 里的视频 input
-    const wrapperInputs = document.querySelectorAll('.bcc-upload-wrapper input[type="file"]')
-    let fileInput = null
-    for (const inp of wrapperInputs) {
-      const accept = (inp.getAttribute('accept') || '').toLowerCase()
-      if (accept.includes('.mp4') || accept.includes('.flv') || accept.includes('.mkv') ||
-          accept.includes('.avi') || accept.includes('.mov') || accept.includes('.webm') ||
-          accept.includes('video')) {
-        fileInput = inp
-        break
-      }
-    }
-
-    if (!fileInput) {
-      // fallback: 找第一个视频格式的 input
-      const allInputs = document.querySelectorAll('input[type="file"]')
-      for (const inp of allInputs) {
-        const accept = (inp.getAttribute('accept') || '').toLowerCase()
-        if (accept.includes('.mp4') || accept.includes('video')) {
-          fileInput = inp
-          break
-        }
-      }
-    }
-
-    if (!fileInput) {
-      throw new Error('未找到视频文件输入框')
-    }
-
-    onLog(`找到视频输入框 (display=${window.getComputedStyle(fileInput).display})`)
-
-    // 用原生 setter 设置文件（Vue 兼容）
-    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files').set
-    const dt = new DataTransfer()
-    dt.items.add(file)
-    if (nativeSetter) {
-      nativeSetter.call(fileInput, dt.files)
-    } else {
-      fileInput.files = dt.files
-    }
-    fileInput.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
-    fileInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
-    onLog('分P文件已选择，等待上传...')
-  }
-
-  /**
-   * 点击队列中下一个待处理的视频卡片，进入其编辑页面
-   */
-  async function clickNextVideoInQueue(onLog) {
-    onLog('正在查找队列中的下一个视频...')
-
-    // 轮询查找并点击（最多等3分钟）
-    for (let attempt = 0; attempt < 60; attempt++) {
-      // 尝试多种选择器找视频卡片
-      const candidates = document.querySelectorAll(
-        '[class*="upload-card"], [class*="video-card"], [class*="part-item"], ' +
-        '[class*="list-item"], [class*="queue-item"], .el-card, [role="listitem"]'
-      )
-
-      for (const card of candidates) {
-        const text = card.textContent || ''
-        // 找包含视频状态但不是已完成的卡片
-        if ((text.includes('上传中') || text.includes('等待上传') || text.includes('转码中')) &&
-            !text.includes('已上传') && !text.includes('已完成')) {
-          // 跳过当前正在编辑的卡片（蓝色高亮的）
-          const style = window.getComputedStyle(card)
-          if (style.backgroundColor.includes('255, 255, 255') || style.backgroundColor === 'rgba(0, 0, 0, 0)') {
-            // 白色背景或透明 = 未选中，可以点击
-            if (!document.querySelector('input[placeholder*="标题"], textarea[placeholder*="标题"]')) {
-              onLog(`找到待处理卡片，点击进入编辑页面...`)
-              card.click()
-              return true
-            }
-          }
-        }
-      }
-
-      // 备用：找所有包含日期格式的可点击元素
-      if (!document.querySelector('input[placeholder*="标题"], textarea[placeholder*="标题"]')) {
-        const allClickable = document.querySelectorAll('a, [role="button"], button, [class*="card"], [class*="item"]')
-        for (const el of allClickable) {
-          const text = el.textContent || ''
-          if (/\d{4}-\d{2}-\d{2}/.test(text) && text.length < 100) {
-            // 跳过当前选中的（蓝色背景）
-            const style = window.getComputedStyle(el)
-            const bg = style.backgroundColor
-            // 如果背景不是白色/透明，说明是当前选中的，跳过
-            if (bg && !bg.includes('255, 255, 255') && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
-              continue
-            }
-            if (!document.querySelector('input[placeholder*="标题"]')) {
-              onLog(`找到视频元素，点击...`)
-              el.click()
-              return true
-            }
-          }
-        }
-      }
-
-      await sleep(3000)
-    }
-
-    return false
-  }
+  // (uploadViaAddPart 和 clickNextVideoInQueue 已移除——功能内联在 batchUpload 中)
 
   /**
    * 批量上传：第一个视频正常上传，后续点击队列卡片进入编辑页面再上传
@@ -788,74 +682,40 @@
           fileInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
           onLog('文件已设置，等待视频卡片出现...')
 
-          // 等待视频卡片出现在队列中
+          // 等待视频卡片出现在队列中（MutationObserver 替代 setInterval 轮询）
           const titleKeyword = parseTitle(file.name)
-          await new Promise((resolve, reject) => {
-            const check = () => {
-              const allEls = document.querySelectorAll('*')
-              for (const el of allEls) {
-                const text = el.textContent || ''
-                if (text.includes(titleKeyword) && text.length < 200) {
-                  const rect = el.getBoundingClientRect()
-                  if (rect.width > 100 && rect.height > 30) {
-                    return true
-                  }
-                }
-              }
-              return false
-            }
-            if (check()) return resolve()
-            const timer = setInterval(() => {
-              if (check()) { clearInterval(timer); resolve() }
-            }, 2000)
-            setTimeout(() => { clearInterval(timer); reject(new Error('等待视频卡片出现超时')) }, 60000)
-          })
+          await waitForElementByText(titleKeyword, 60000)
           onLog('视频卡片已出现在队列中')
           await sleep(2000)
 
           // 点击视频卡片进入编辑页面
           onLog('点击视频卡片...')
-          const allEls = document.querySelectorAll('*')
-          let clickedCard = false
-          let bestEl = null
-          let bestSize = Infinity
-
-          // 找最小的匹配元素（最精确的）
-          for (const el of allEls) {
+          let bestEl = null, bestSize = Infinity
+          for (const el of document.querySelectorAll('*')) {
             const text = el.textContent || ''
             if (text.includes(titleKeyword) && text.length < 200) {
               const rect = el.getBoundingClientRect()
               if (rect.width > 100 && rect.height > 30) {
                 const size = rect.width * rect.height
-                if (size < bestSize) {
-                  bestSize = size
-                  bestEl = el
-                }
+                if (size < bestSize) { bestSize = size; bestEl = el }
               }
             }
           }
+          if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`)
 
-          if (bestEl) {
-            // 用 toClickable 找到真正的可点击父元素
-            const clickable = toClickable(bestEl)
-            if (clickable && clickable !== bestEl) {
-              onLog(`找到可点击父元素: ${clickable.tagName}`)
-              const rect = clickable.getBoundingClientRect()
-              clickable.dispatchEvent(new MouseEvent('click', {
-                bubbles: true, cancelable: true, view: window,
-                clientX: rect.left + rect.width / 2,
-                clientY: rect.top + rect.height / 2
-              }))
-            } else {
-              bestEl.click()
-            }
-            clickedCard = true
-            onLog('已点击视频卡片')
+          const clickable = toClickable(bestEl)
+          if (clickable && clickable !== bestEl) {
+            onLog(`找到可点击父元素: ${clickable.tagName}`)
+            const rect = clickable.getBoundingClientRect()
+            clickable.dispatchEvent(new MouseEvent('click', {
+              bubbles: true, cancelable: true, view: window,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2
+            }))
+          } else {
+            bestEl.click()
           }
-
-          if (!clickedCard) {
-            throw new Error(`未能点击视频卡片: ${titleKeyword}`)
-          }
+          onLog('已点击视频卡片')
 
           // 等待编辑页面加载
           onLog('等待编辑页面加载...')

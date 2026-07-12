@@ -819,6 +819,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .bottom-bar .btn{flex:1;min-width:0;font-size:13px;padding:10px 8px;min-height:44px}
 /* 空状态 */
 .empty{text-align:center;padding:48px 20px;color:var(--text-secondary);font-size:14px;line-height:1.6}
+/* 投稿列表展开/收起 */
+.upload-expand{text-align:center;padding:14px 0;color:var(--primary);font-size:13px;font-weight:500;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
+.upload-expand:active{opacity:.7}
 /* Toast */
 .toast{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-20px);background:rgba(0,0,0,.8);color:#fff;padding:12px 24px;border-radius:var(--radius-sm);font-size:14px;z-index:100;opacity:0;transition:all .3s ease;pointer-events:none;white-space:nowrap;backdrop-filter:blur(8px)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -978,6 +981,7 @@ let uploadSelectedKeys = new Set();
 let pollTimer = null, authToken = '';
 let prevStatus = '';
 let pollFailCount = 0;
+let uploadShowAll = false;  // 待投稿列表是否展开全部
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -1339,6 +1343,7 @@ async function loadMergedFiles() {
     if (!data) return;
     serverMergedFiles = data.files || [];
     uploadSelectedKeys.clear();
+    uploadShowAll = false;  // 重置折叠状态
     renderUploadList();
   } catch (e) {}
 }
@@ -1364,14 +1369,37 @@ function renderUploadList() {
     document.getElementById('uploadSelectedBtn').disabled = true;
     return;
   }
-  el.innerHTML = serverMergedFiles.map(function(f, i) {
+
+  var MAX_VISIBLE = 8;
+  var total = serverMergedFiles.length;
+  var showAll = uploadShowAll || total <= MAX_VISIBLE;
+  var visibleFiles = showAll ? serverMergedFiles : serverMergedFiles.slice(0, MAX_VISIBLE);
+
+  var html = visibleFiles.map(function(f, i) {
     var checked = uploadSelectedKeys.has(i) ? 'checked' : '';
     return '<div class="group-item">' +
       '<input type="checkbox" class="group-check" ' + checked + ' onchange="toggleUploadSelect(' + i + ', this.checked)">' +
       '<div class="group-info"><div class="group-name">' + escHtml(formatUploadName(f.name)) + '</div><div class="group-meta">' + formatMtime(f.mtime) + '</div></div>' +
     '</div>';
   }).join('');
+
+  // 超出限制时追加展开/收起按钮
+  if (total > MAX_VISIBLE) {
+    var remaining = total - MAX_VISIBLE;
+    html += '<div class="upload-expand" onclick="toggleUploadExpand()">' +
+      (uploadShowAll
+        ? '▲ 收起列表'
+        : '▼ 展开全部（还有 ' + remaining + ' 个文件）') +
+      '</div>';
+  }
+
+  el.innerHTML = html;
   document.getElementById('uploadSelectedBtn').disabled = uploadSelectedKeys.size === 0;
+}
+
+function toggleUploadExpand() {
+  uploadShowAll = !uploadShowAll;
+  renderUploadList();
 }
 
 function toggleUploadSelect(index, checked) {
@@ -1546,6 +1574,11 @@ updateStatus(); startPolling();
 
 /** 启动控制服务器 */
 export async function startControlServer(port: number = 9820): Promise<string> {
+  // 如果端口变了，重启服务器
+  if (controlServer && controlPort !== port) {
+    console.log('[ControlServer] 端口变更 ' + controlPort + ' -> ' + port + '，正在重启...')
+    stopControlServer()
+  }
   if (controlServer) return getControlUrl()
   controlPort = port
 
