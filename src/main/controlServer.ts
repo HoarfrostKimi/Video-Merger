@@ -77,6 +77,12 @@ let cachedMergedFiles: mergedFiles.MergedFile[] = []
 let cachedMergedFilesTime = 0
 const MERGED_FILES_CACHE_TTL = 5000 // 5秒缓存
 
+// 移动端 HTML 缓存（避免每次请求都拼接 70KB 字符串）
+let mobileHtmlCache = ''
+
+// 视频文件信息缓存（避免每次 Range 请求都 statSync）
+const videoFileCache = new Map<number, { path: string; size: number }>()
+
 // ============ 工具函数 ============
 
 /** 获取本机局域网 IPv4 地址 */
@@ -291,13 +297,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       if (pwd && qToken !== pwd) { res.writeHead(401); res.end('Unauthorized'); return }
       const idx = parseInt(url.searchParams.get('index') || '')
       if (isNaN(idx) || idx < 0) { res.writeHead(400); res.end('Invalid index'); return }
-      const files = mergedFiles.scanFolder(configRef.outputFolder || '')
-      if (idx >= files.length) { res.writeHead(404); res.end('Not found'); return }
-      const fp = files[idx].path
-      if (!existsSync(fp)) { res.writeHead(404); res.end('Not found'); return }
-      const st = statSync(fp)
-      const fileSize = st.size
+      // 缓存文件路径和大小，避免每次 Range 请求都 statSync
+      let cached = videoFileCache.get(idx)
+      if (!cached) {
+        const files = cachedMergedFiles.length > 0 ? cachedMergedFiles : mergedFiles.scanFolder(configRef.outputFolder || '')
+        if (idx >= files.length) { res.writeHead(404); res.end('Not found'); return }
+        const fp = files[idx].path
+        try { cached = { path: fp, size: statSync(fp).size }; videoFileCache.set(idx, cached) }
+        catch { res.writeHead(404); res.end('Not found'); return }
+      }
+      const { path: fp, size: fileSize } = cached
       const range = req.headers.range
+      let stream
+      // highWaterMark=1MB 减少 syscall，提升局域网吞吐
+      const streamOpts = { highWaterMark: 1024 * 1024 }
       if (range) {
         const parts = range.replace(/bytes=/, '').split('-')
         const s = parseInt(parts[0])
@@ -309,7 +322,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           'Content-Type': 'video/mp4',
           'Access-Control-Allow-Origin': '*'
         })
-        createReadStream(fp, { start: s, end: e }).pipe(res)
+        stream = createReadStream(fp, { ...streamOpts, start: s, end: e })
       } else {
         res.writeHead(200, {
           'Content-Length': fileSize,
@@ -317,15 +330,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           'Accept-Ranges': 'bytes',
           'Access-Control-Allow-Origin': '*'
         })
-        createReadStream(fp).pipe(res)
+        stream = createReadStream(fp, streamOpts)
       }
+      req.on('close', () => { if (stream) stream.destroy() })
+      stream.pipe(res)
     } catch {
       if (!res.headersSent) { res.writeHead(500); res.end('Stream error') }
     }
     return
-  }
-
-  // API 认证检查（登录接口除外，使用缓存的 configRef 避免每次请求都读文件）
+  
+  }  // API 认证检查（登录接口除外，使用缓存的 configRef 避免每次请求都读文件）
   if (path.startsWith('/api/')) {
     const password = configRef.controlPassword || ''
     if (password) {
@@ -804,7 +818,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 // ============ 移动端 HTML 页面（含登录、分组管理、批量操作、设置） ============
 
 function getMobileHtml(): string {
-  return `<!DOCTYPE html>
+  if (mobileHtmlCache) return mobileHtmlCache
+  mobileHtmlCache = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -1645,6 +1660,7 @@ updateStatus(); startPolling();
 </script>
 </body>
 </html>`
+  return mobileHtmlCache
 }
 
 // ============ 服务器启动/停止 ============
