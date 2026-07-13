@@ -20,8 +20,15 @@ export const formatSize = (bytes: number): string => {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
-// 从合并文件名提取简洁显示名：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
+// 从文件名提取显示名，兼容新旧两种格式：
+// 新：95老阿姨_2026-07-09.mp4 → 95老阿姨 (2026-07-09)
+// 旧：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
 export const formatUploadName = (fileName: string) => {
-  const match = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/)
-  return match ? `${match[1]} ${match[2]}` : fileName.replace(/\.mp4$/i, '')
+  // 新格式：Title_YYYY-MM-DD.mp4
+  let m = fileName.match(/^(.+?)_(\d{4}-\d{2}-\d{2})\.mp4$/i)
+  if (m) return `${m[1]} (${m[2]})`
+  // 旧格式：YYYY-MM-DD_Title_...
+  m = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/)
+  if (m) return `${m[1]} ${m[2]}`
+  return fileName.replace(/\.mp4$/i, '')
 }

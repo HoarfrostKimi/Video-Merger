@@ -4,7 +4,7 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
 import { networkInterfaces } from 'os'
 import { join, basename } from 'path'
-import { writeFileSync } from 'fs'
+import { writeFileSync, createReadStream, statSync, existsSync } from 'fs'
 import { mergeVideos } from './ffmpeg'
 import * as mergedFiles from './mergedFiles'
 import { invalidateCache } from './mergedFiles'
@@ -279,6 +279,48 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
     } catch {
       sendJson(res, 400, { error: '请求格式错误' })
+    }
+    return
+  }
+
+  // GET /api/video-stream?index=N&token=T — 视频预览（在认证之前，video 标签用 query param 传 token）
+  if (path === '/api/video-stream' && method === 'GET') {
+    try {
+      const qToken = url.searchParams.get('token') || ''
+      const pwd = configRef.controlPassword || ''
+      if (pwd && qToken !== pwd) { res.writeHead(401); res.end('Unauthorized'); return }
+      const idx = parseInt(url.searchParams.get('index') || '')
+      if (isNaN(idx) || idx < 0) { res.writeHead(400); res.end('Invalid index'); return }
+      const files = mergedFiles.scanFolder(configRef.outputFolder || '')
+      if (idx >= files.length) { res.writeHead(404); res.end('Not found'); return }
+      const fp = files[idx].path
+      if (!existsSync(fp)) { res.writeHead(404); res.end('Not found'); return }
+      const st = statSync(fp)
+      const fileSize = st.size
+      const range = req.headers.range
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-')
+        const s = parseInt(parts[0])
+        const e = parts[1] ? parseInt(parts[1]) : fileSize - 1
+        res.writeHead(206, {
+          'Content-Range': `bytes ${s}-${e}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': e - s + 1,
+          'Content-Type': 'video/mp4',
+          'Access-Control-Allow-Origin': '*'
+        })
+        createReadStream(fp, { start: s, end: e }).pipe(res)
+      } else {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': 'video/mp4',
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*'
+        })
+        createReadStream(fp).pipe(res)
+      }
+    } catch {
+      if (!res.headersSent) { res.writeHead(500); res.end('Stream error') }
     }
     return
   }
@@ -822,6 +864,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 /* 投稿列表展开/收起 */
 .upload-expand{text-align:center;padding:14px 0;color:var(--primary);font-size:13px;font-weight:500;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
 .upload-expand:active{opacity:.7}
+/* 视频预览浮层 */
+.video-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.92);z-index:999;flex-direction:column;align-items:center;justify-content:center}
+.video-overlay video{max-width:100%;max-height:80vh;border-radius:4px}
+.video-close{position:absolute;top:16px;right:16px;width:40px;height:40px;background:rgba(255,255,255,.2);border:none;border-radius:50%;color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center}
 /* Toast */
 .toast{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-20px);background:rgba(0,0,0,.8);color:#fff;padding:12px 24px;border-radius:var(--radius-sm);font-size:14px;z-index:100;opacity:0;transition:all .3s ease;pointer-events:none;white-space:nowrap;backdrop-filter:blur(8px)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -966,6 +1012,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       </div>
     </div>
   </div>
+</div>
+
+<!-- 视频预览浮层 -->
+<div class="video-overlay" id="videoPlayerOverlay" onclick="closeVideoPreview()">
+  <button class="video-close" onclick="event.stopPropagation();closeVideoPreview()">✕</button>
+  <video id="videoPlayer" controls autoplay onclick="event.stopPropagation()"></video>
 </div>
 
 <div class="bottom-bar" id="bottomBar">
@@ -1355,10 +1407,16 @@ function formatMtime(ms) {
   return (d.getMonth()+1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
-// 从合并文件名提取简洁显示名：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
+// 从文件名提取显示名，兼容新旧两种格式：
+// 新：95老阿姨_2026-07-09.mp4 → 95老阿姨 (2026-07-09)
+// 旧：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
 function formatUploadName(fileName) {
-  var match = fileName.match(/^(\\d{4}-\\d{2}-\\d{2})_(.+?)_/);
-  if (match) return match[1] + ' ' + match[2];
+  // 新格式：Title_YYYY-MM-DD.mp4
+  var m = fileName.match(/^(.+?)_(\\d{4}-\\d{2}-\\d{2})\\.mp4$/i);
+  if (m) return m[1] + ' (' + m[2] + ')';
+  // 旧格式：YYYY-MM-DD_Title_...
+  m = fileName.match(/^(\\d{4}-\\d{2}-\\d{2})_(.+?)_/);
+  if (m) return m[1] + ' ' + m[2];
   return fileName.replace(/\\.mp4$/i, '');
 }
 
@@ -1380,6 +1438,7 @@ function renderUploadList() {
     return '<div class="group-item">' +
       '<input type="checkbox" class="group-check" ' + checked + ' onchange="toggleUploadSelect(' + i + ', this.checked)">' +
       '<div class="group-info"><div class="group-name">' + escHtml(formatUploadName(f.name)) + '</div><div class="group-meta">' + formatMtime(f.mtime) + '</div></div>' +
+      '<span onclick="openVideoPreview(' + i + ')" style="font-size:18px;padding:8px;cursor:pointer;flex-shrink:0" title="预览">▶️</span>' +
     '</div>';
   }).join('');
 
@@ -1400,6 +1459,24 @@ function renderUploadList() {
 function toggleUploadExpand() {
   uploadShowAll = !uploadShowAll;
   renderUploadList();
+}
+
+function openVideoPreview(index) {
+  var token = authToken || '';
+  var url = '/api/video-stream?index=' + index + '&token=' + encodeURIComponent(token);
+  var overlay = document.getElementById('videoPlayerOverlay');
+  var video = document.getElementById('videoPlayer');
+  video.src = url;
+  overlay.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+}
+function closeVideoPreview() {
+  var overlay = document.getElementById('videoPlayerOverlay');
+  var video = document.getElementById('videoPlayer');
+  video.pause();
+  video.src = '';
+  overlay.style.display = 'none';
+  document.body.style.overflow = '';
 }
 
 function toggleUploadSelect(index, checked) {

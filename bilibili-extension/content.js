@@ -855,6 +855,11 @@
   const urlParams = new URLSearchParams(window.location.search)
   const autoFilesParam = urlParams.get('autoFiles')
   if (autoFilesParam) {
+    // 立即清除 URL 中的 autoFiles 参数，防止刷新页面后重复投稿
+    urlParams.delete('autoFiles')
+    const newSearch = urlParams.toString()
+    history.replaceState(null, '', location.pathname + (newSearch ? '?' + newSearch : '') + location.hash)
+
     const fileUrls = autoFilesParam.split(',').map((u) => decodeURIComponent(u.trim())).filter(Boolean)
     if (fileUrls.length > 0) {
       console.log('[B站投稿助手] 检测到自动上传参数，文件数:', fileUrls.length)

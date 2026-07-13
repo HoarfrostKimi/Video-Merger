@@ -690,7 +690,7 @@ async function performScan(
           // 标题不同或间隔太大，先搜索所有已有分组看能否合并
           let matched = false
           for (const group of groups) {
-            if (group.title === file.title && group.date === file.date) {
+            if (group.title === file.title) {
               const gap = file.timestamp - group.lastTimestamp
               if (gap <= MAX_INTERVAL_MS) {
                 group.fileCount++
