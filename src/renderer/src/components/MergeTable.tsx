@@ -1,6 +1,6 @@
-import React, { useMemo } from 'react'
-import { Button, Card, Space, Table, Tag, Typography } from 'antd'
-import { ClearOutlined, EyeInvisibleOutlined, EyeOutlined } from '@ant-design/icons'
+import React, { useMemo, useState } from 'react'
+import { Button, Card, Input, Select, Space, Table, Tag, Typography } from 'antd'
+import { ClearOutlined, EyeInvisibleOutlined, EyeOutlined, SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { formatSize } from '../utils/format'
 
@@ -33,6 +33,25 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
   onSelectionChange,
   genMergeFileName
 }) => {
+  const [searchText, setSearchText] = useState('')
+  const [sortBy, setSortBy] = useState<string>('date:desc')
+
+  const filteredFolders = useMemo(() => {
+    let list = folders
+    if (searchText.trim()) {
+      const kw = searchText.trim().toLowerCase()
+      list = list.filter(f => f.title.toLowerCase().includes(kw) || f.date.includes(kw))
+    }
+    const [field, order] = sortBy.split(':')
+    return [...list].sort((a, b) => {
+      let cmp = 0
+      if (field === 'date') cmp = a.date.localeCompare(b.date)
+      else if (field === 'title') cmp = a.title.localeCompare(b.title)
+      else if (field === 'fileCount') cmp = a.fileCount - b.fileCount
+      else if (field === 'totalSize') cmp = a.totalSize - b.totalSize
+      return order === 'desc' ? -cmp : cmp
+    })
+  }, [folders, searchText, sortBy])
   const columns = useMemo<ColumnsType<FolderGroup>>(() => [
     {
       title: '日期',
@@ -95,7 +114,30 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
         </Space>
       }
       extra={
-        <Space>
+        <Space size={4} wrap>
+          <Input
+            size="small"
+            placeholder="搜索标题/日期..."
+            prefix={<SearchOutlined />}
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            allowClear
+            style={{ width: 160 }}
+          />
+          <Select
+            size="small"
+            value={sortBy}
+            onChange={setSortBy}
+            style={{ width: 130 }}
+            options={[
+              { value: 'date:desc', label: '日期 ↓' },
+              { value: 'date:asc', label: '日期 ↑' },
+              { value: 'title:asc', label: '标题 A-Z' },
+              { value: 'title:desc', label: '标题 Z-A' },
+              { value: 'fileCount:desc', label: '片段数 ↓' },
+              { value: 'totalSize:desc', label: '大小 ↓' },
+            ]}
+          />
           <Button size="small" onClick={onSelectAll}>
             全选
           </Button>
@@ -114,7 +156,7 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
       }
     >
       <Table
-        dataSource={folders}
+        dataSource={filteredFolders}
         columns={columns}
         rowKey="key"
         size="small"

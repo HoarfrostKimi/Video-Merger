@@ -14,7 +14,7 @@ interface Window {
     openDirectory: (path: string) => Promise<void>
     openExternal: (url: string) => Promise<void>
     // 扫描
-    scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: string) => Promise<ScanResult>
+    scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: string, _unused?: string, folderPath2?: string) => Promise<ScanResult>
     // 视频
     getVideoInfo: (filePath: string) => Promise<VideoInfo>
     mergeVideos: (filePaths: string[], outputPath: string) => Promise<string | undefined>
@@ -51,6 +51,7 @@ interface Window {
 
 interface AppConfig {
   inputFolder?: string
+  inputFolder2?: string
   outputFolder?: string
   outputFileName?: string
   darkMode?: boolean

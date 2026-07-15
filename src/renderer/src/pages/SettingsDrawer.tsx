@@ -24,6 +24,7 @@ interface DraftConfig {
   controlEnabled: boolean
   controlPort: number
   controlPassword: string
+  inputFolder2: string
 }
 
 type DraftAction = { type: 'init'; payload: DraftConfig } | { type: 'update'; key: keyof DraftConfig; value: unknown }
@@ -50,6 +51,7 @@ const initialDraft: DraftConfig = {
   runInBackground: false,
   controlEnabled: true,
   controlPort: 9820,
+  inputFolder2: '',
   controlPassword: ''
 }
 
@@ -76,6 +78,7 @@ function SettingsDrawer({ visible, onClose, config, onSave, darkMode: _darkMode 
           runInBackground: config.runInBackground ?? false,
           controlEnabled: config.controlEnabled ?? true,
           controlPort: config.controlPort ?? 9820,
+          inputFolder2: config.inputFolder2 ?? '',
           controlPassword: config.controlPassword ?? ''
         }
       })
@@ -208,6 +211,27 @@ function SettingsDrawer({ visible, onClose, config, onSave, darkMode: _darkMode 
           </div>
         </div>
         <Text type="secondary" style={{ ...descStyle, marginTop: -4 }}>同时合并的分组数量，建议 2-4</Text>
+
+        <div style={settingRowStyle}>
+          <Text style={labelStyle}>额外扫描目录</Text>
+          <div style={rightStyle}>
+            <Input
+              value={draft.inputFolder2}
+              onChange={(e) => dispatchDraft({ type: 'update', key: 'inputFolder2', value: e.target.value })}
+              style={{ width: 240 }}
+              placeholder="留空只扫主目录"
+              size="small"
+            />
+            <Button size="small" onClick={async () => {
+              if (!window.api) return
+              try {
+                const folder = await window.api.selectFolder()
+                dispatchDraft({ type: 'update', key: 'inputFolder2', value: folder })
+              } catch {}
+            }}>浏览</Button>
+          </div>
+        </div>
+        <Text type="secondary" style={{ ...descStyle, marginTop: -4 }}>扫描时会同时扫描此目录</Text>
 
         {/* ===== 自动化设置 ===== */}
         <Divider orientation="left" plain style={sectionTitleStyle}>

@@ -25,6 +25,7 @@ interface VideoGroup {
 
 interface AppConfig {
   inputFolder?: string
+  inputFolder2?: string
   outputFolder?: string
   maxIntervalHours?: number
   concurrency?: number
@@ -81,7 +82,7 @@ const MERGED_FILES_CACHE_TTL = 5000 // 5秒缓存
 let mobileHtmlCache = ''
 
 // 视频文件信息缓存（避免每次 Range 请求都 statSync）
-const videoFileCache = new Map<number, { path: string; size: number }>()
+const videoFileCache = new Map<string, { path: string; size: number }>()
 
 // ============ 工具函数 ============
 
@@ -295,15 +296,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       const qToken = url.searchParams.get('token') || ''
       const pwd = configRef.controlPassword || ''
       if (pwd && qToken !== pwd) { res.writeHead(401); res.end('Unauthorized'); return }
-      const idx = parseInt(url.searchParams.get('index') || '')
-      if (isNaN(idx) || idx < 0) { res.writeHead(400); res.end('Invalid index'); return }
+      const nameParam = url.searchParams.get('name') || url.searchParams.get('index') || ''
+      if (!nameParam) { res.writeHead(400); res.end('Missing name'); return }
       // 缓存文件路径和大小，避免每次 Range 请求都 statSync
-      let cached = videoFileCache.get(idx)
+      let cached = videoFileCache.get(nameParam)
       if (!cached) {
         const files = cachedMergedFiles.length > 0 ? cachedMergedFiles : mergedFiles.scanFolder(configRef.outputFolder || '')
-        if (idx >= files.length) { res.writeHead(404); res.end('Not found'); return }
-        const fp = files[idx].path
-        try { cached = { path: fp, size: statSync(fp).size }; videoFileCache.set(idx, cached) }
+        const found = files.find((f: any) => f.name === nameParam || String(f.index) === nameParam)
+        if (!found) { res.writeHead(404); res.end('Not found'); return }
+        const fp = found.path
+        try { cached = { path: fp, size: statSync(fp).size }; videoFileCache.set(nameParam, cached) }
         catch { res.writeHead(404); res.end('Not found'); return }
       }
       const { path: fp, size: fileSize } = cached
@@ -426,6 +428,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
       lastGroups = await doScan(inputFolder, maxInterval)
+      // 如果配置了第二个目录，也扫描并合并
+      const folder2 = configRef.inputFolder2
+      if (folder2 && folder2 !== inputFolder) {
+        const groups2 = await doScan(folder2, maxInterval)
+        const merged = new Map<string, VideoGroup>()
+        for (const g of [...lastGroups, ...groups2]) {
+          const existing = merged.get(g.key)
+          if (existing) { existing.fileCount += g.fileCount; existing.totalSize += g.totalSize; existing.files.push(...g.files) }
+          else { merged.set(g.key, { ...g }) }
+        }
+        lastGroups = Array.from(merged.values())
+      }
       // 应用排除列表
       if (loadConfigFn) configRef = loadConfigFn()
       const scanHiddenKeys = new Set(configRef.hiddenFolderKeys || [])
@@ -489,12 +503,25 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       // 合并完成，刷新缓存
       invalidateCache()
+      videoFileCache.clear()
 
       // 重新扫描（使用主 App 的扫描逻辑，保证列表一致）
       const inputFolder = configRef.inputFolder
       const maxInterval = configRef.maxIntervalHours || 2.5
       if (inputFolder) {
         lastGroups = await doScan(inputFolder, maxInterval)
+        var f2 = configRef.inputFolder2
+        if (f2 && f2 !== inputFolder) {
+          var g2 = await doScan(f2, maxInterval)
+          var m = new Map()
+          for (var _i = 0; _i < lastGroups.length; _i++) m.set(lastGroups[_i].key, Object.assign({}, lastGroups[_i]))
+          for (var _j = 0; _j < g2.length; _j++) {
+            var g = g2[_j], e = m.get(g.key)
+            if (e) { e.fileCount += g.fileCount; e.totalSize += g.totalSize; Array.prototype.push.apply(e.files, g.files) }
+            else { m.set(g.key, Object.assign({}, g)) }
+          }
+          lastGroups = Array.from(m.values())
+        }
       }
       // 合并后重新应用排除列表
       if (loadConfigFn) configRef = loadConfigFn()
@@ -736,6 +763,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       // 合并完成，刷新缓存
       invalidateCache()
+      videoFileCache.clear()
 
       // 重新扫描
       const inputFolder = configRef.inputFolder
@@ -793,6 +821,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         console.log('[ControlServer] 手机视频已上传:', outputPath, `(${(buffer.length / 1024 / 1024).toFixed(1)}MB)`)
         // 刷新缓存
         invalidateCache()
+        videoFileCache.clear()
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
           'Access-Control-Allow-Origin': '*'
@@ -1110,13 +1139,15 @@ function showMain() {
   document.getElementById('bottomBar').classList.remove('hidden');
 }
 async function doLogin() {
-  const pwd = document.getElementById('passwordInput').value;
+  var pwdEl = document.getElementById('passwordInput');
+  if (!pwdEl) { alert('错误：找不到密码输入框'); return; }
+  var pwd = pwdEl.value;
   try {
     const res = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) });
     const data = await res.json();
     if (data.success) { authToken = data.token; saveToken(data.token); showMain(); updateStatus(); setTimeout(doScan, 300); }
-    else { toast(data.error || '登录失败'); }
-  } catch (e) { toast('连接失败'); }
+    else { toast(data.error || '登录失败'); alert(data.error || '登录失败'); }
+  } catch (e) { toast('连接失败'); alert('连接失败：' + e.message); }
 }
 // 自动登录
 (function() {
@@ -1453,7 +1484,7 @@ function renderUploadList() {
     return '<div class="group-item">' +
       '<input type="checkbox" class="group-check" ' + checked + ' onchange="toggleUploadSelect(' + i + ', this.checked)">' +
       '<div class="group-info"><div class="group-name">' + escHtml(formatUploadName(f.name)) + '</div><div class="group-meta">' + formatMtime(f.mtime) + '</div></div>' +
-      '<span onclick="openVideoPreview(' + i + ')" style="font-size:18px;padding:8px;cursor:pointer;flex-shrink:0" title="预览">▶️</span>' +
+      '<span onclick="openVideoPreview(\\\'' + escHtml(f.name) + '\\\')" style="font-size:18px;padding:8px;cursor:pointer;flex-shrink:0" title="预览">▶️</span>' +
     '</div>';
   }).join('');
 
@@ -1476,9 +1507,9 @@ function toggleUploadExpand() {
   renderUploadList();
 }
 
-function openVideoPreview(index) {
+function openVideoPreview(name) {
   var token = authToken || '';
-  var url = '/api/video-stream?index=' + index + '&token=' + encodeURIComponent(token);
+  var url = '/api/video-stream?name=' + encodeURIComponent(name) + '&token=' + encodeURIComponent(token);
   var overlay = document.getElementById('videoPlayerOverlay');
   var video = document.getElementById('videoPlayer');
   video.src = url;

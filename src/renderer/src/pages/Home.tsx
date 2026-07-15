@@ -20,6 +20,7 @@ interface HomeProps {
 
 function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [inputFolder, setInputFolder] = useState('')
+  const [inputFolder2, setInputFolder2] = useState('')
   const [outputFolder, setOutputFolder] = useState('')
   const [folders, setFolders] = useState<FolderGroup[]>([])
   const [hiddenFolderKeys, setHiddenFolderKeys] = useState<string[]>([])
@@ -51,8 +52,12 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const [showUploadModal, setShowUploadModal] = useState(false)
   const [uploadSelectedKeys, setUploadSelectedKeys] = useState<React.Key[]>([])
   const [uploading, setUploading] = useState(false)
+  const [uploadElapsed, setUploadElapsed] = useState(0)
+  const [uploadDone, setUploadDone] = useState(false)
+  const [uploadingFileNames, setUploadingFileNames] = useState<string[]>([])
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pluginPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const uploadPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const websiteOpenedRef = useRef(false)
   const folderOpenedRef = useRef(false)
 
@@ -62,6 +67,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       // 第一步：加载配置
       let loadedInputFolder = ''
       let loadedOutputFolder = ''
+      let loadedInputFolder2 = ''
       let loadedHiddenKeys: string[] = []
       try {
         const config = await window.api.loadConfig()
@@ -69,7 +75,12 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           loadedInputFolder = config.inputFolder
           setInputFolder(config.inputFolder)
         }
+        if (config.inputFolder2) {
+          loadedInputFolder2 = config.inputFolder2
+          setInputFolder2(config.inputFolder2)
+        }
         if (config.outputFolder) {
+          loadedOutputFolder = config.outputFolder
           setOutputFolder(config.outputFolder)
         }
         if (config.maxIntervalHours !== undefined) {
@@ -133,7 +144,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       if (loadedInputFolder) {
         try {
           setScanning(true)
-          const result: ScanResult = await window.api.scanFlvFiles(loadedInputFolder, 2.5, loadedOutputFolder)
+          const result: ScanResult = await window.api.scanFlvFiles(loadedInputFolder, 2.5, loadedOutputFolder || loadedInputFolder, undefined, loadedInputFolder2 || undefined)
           const hiddenSet = new Set(loadedHiddenKeys)
           const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
           const hidden = result.folders.filter((f) => hiddenSet.has(f.key))
@@ -172,11 +183,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   }, [])
 
   const genMergeFileName = useCallback((folder: FolderGroup) => {
-    const now = new Date()
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-    const timeStr = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-    return `${folder.date}_${folder.title}_${dateStr}_${timeStr}_合并版`
+    return `${folder.title}_${folder.date}`
   }, [])
 
   const handleSelectInputFolder = useCallback(async () => {
@@ -184,25 +191,34 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     try {
       const folder = await window.api.selectFolder()
       setInputFolder(folder)
+      const configToSave: Record<string, unknown> = { inputFolder: folder }
       if (!outputFolder) {
         setOutputFolder(folder)
+        configToSave.outputFolder = folder
       }
-      setFolders([])
-      setHiddenFolderKeys([])
-      setHiddenFolders([])
-      setShowHidden(false)
-      setSelectedRowKeys([])
-      setSelectedFolder(null)
-    } catch (err: any) {
-      message.error(err.message || '选择文件夹失败')
-    }
+      window.api.saveConfig(configToSave)
+      setFolders([]); setHiddenFolderKeys([]); setHiddenFolders([])
+      setShowHidden(false); setSelectedRowKeys([]); setSelectedFolder(null)
+    } catch (err: any) { message.error(err.message || '选择文件夹失败') }
   }, [outputFolder])
+
+  const handleSelectInputFolder2 = useCallback(async () => {
+    if (!window.api) return
+    try {
+      const folder = await window.api.selectFolder()
+      setInputFolder2(folder)
+      window.api.saveConfig({ inputFolder2: folder })
+      setFolders([]); setHiddenFolderKeys([]); setHiddenFolders([])
+      setShowHidden(false); setSelectedRowKeys([]); setSelectedFolder(null)
+    } catch (err: any) { message.error(err.message || '选择文件夹失败') }
+  }, [])
 
   const handleSelectOutputFolder = useCallback(async () => {
     if (!window.api) return
     try {
       const folder = await window.api.selectOutputFolder()
       setOutputFolder(folder)
+      window.api.saveConfig({ outputFolder: folder })
     } catch (err: any) {
       message.error(err.message || '选择输出文件夹失败')
     }
@@ -216,7 +232,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     }
     setScanning(true)
     try {
-      const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours, outputFolder || undefined)
+      const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours, outputFolder || undefined, undefined, inputFolder2 || undefined)
       const hiddenSet = new Set(hiddenFolderKeys)
       const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
       // 保存被排除的完整对象用于显示
@@ -482,17 +498,38 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const handleUpload = useCallback(async (selectedPaths: string[]) => {
     if (!window.api) return
     setUploading(true)
+    setUploadElapsed(0)
+    setUploadDone(false)
     try {
+      // 提取文件名用于展示
+      const names = selectedPaths.map(p => p.replace(/.*[/\\]/, ''))
+      setUploadingFileNames(names)
       await window.api.uploadMergedFiles(selectedPaths)
-      message.success('已打开B站投稿页面')
-      // 刷新列表
-      const list = await window.api.getMergedFiles()
-      setMergedFiles(list)
-      setUploadSelectedKeys([])
-      setShowUploadModal(false)
+      // 不关闭弹窗，开始轮询等待插件完成
+      const startTime = Date.now()
+      let pollCount = 0
+      uploadPollRef.current = setInterval(async () => {
+        pollCount++
+        setUploadElapsed(Math.floor((Date.now() - startTime) / 1000))
+        try {
+          const done = await window.api!.checkUploadDone()
+          if (done) {
+            if (uploadPollRef.current) clearInterval(uploadPollRef.current)
+            setUploadDone(true)
+            // 刷新列表
+            const list = await window.api!.getMergedFiles()
+            setMergedFiles(list)
+            setUploadSelectedKeys([])
+          }
+        } catch {
+          // ignore
+        }
+        if (pollCount >= 600) {  // 10分钟超时
+          if (uploadPollRef.current) clearInterval(uploadPollRef.current)
+        }
+      }, 1000)
     } catch (err: any) {
       message.error(err.message || '投稿失败')
-    } finally {
       setUploading(false)
     }
   }, [])
@@ -634,7 +671,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           runInBackground,
           controlEnabled,
           controlPort,
-          controlPassword
+          controlPassword,
+          inputFolder2
         }}
         onSave={(newConfig) => {
           if (newConfig.maxIntervalHours !== undefined) setMaxIntervalHours(newConfig.maxIntervalHours)
@@ -648,6 +686,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           if (newConfig.controlEnabled !== undefined) setControlEnabled(newConfig.controlEnabled)
           if (newConfig.controlPort !== undefined) setControlPort(newConfig.controlPort)
           if (newConfig.controlPassword !== undefined) setControlPassword(newConfig.controlPassword)
+          if (newConfig.inputFolder2 !== undefined) setInputFolder2(newConfig.inputFolder2)
           if (window.api) {
             window.api.saveConfig(newConfig)
             // 刷新控制地址
@@ -662,8 +701,16 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         visible={showUploadModal}
         mergedFiles={mergedFiles}
         uploading={uploading}
+        uploadElapsed={uploadElapsed}
+        uploadDone={uploadDone}
+        uploadingFileNames={uploadingFileNames}
         selectedKeys={uploadSelectedKeys}
-        onClose={() => setShowUploadModal(false)}
+        onClose={() => {
+          setShowUploadModal(false)
+          setUploading(false)
+          setUploadDone(false)
+          if (uploadPollRef.current) clearInterval(uploadPollRef.current)
+        }}
         onSelectChange={setUploadSelectedKeys}
         onUpload={handleUpload}
         onLoadFiles={loadMergedFiles}

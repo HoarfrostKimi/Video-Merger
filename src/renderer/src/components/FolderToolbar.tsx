@@ -35,9 +35,6 @@ const FolderToolbar: React.FC<FolderToolbarProps> = React.memo(({
           <Button icon={<FolderOpenOutlined />} onClick={onSelectInput}>
             浏览...
           </Button>
-          <Button type="primary" onClick={onScan} loading={scanning} icon={<ScanOutlined />}>
-            扫描视频
-          </Button>
         </Space>
         <Text strong style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>📁 输出目录</Text>
         <Space wrap>
@@ -49,6 +46,9 @@ const FolderToolbar: React.FC<FolderToolbarProps> = React.memo(({
           />
           <Button icon={<FolderOpenOutlined />} onClick={onSelectOutput}>
             浏览...
+          </Button>
+          <Button type="primary" onClick={onScan} loading={scanning} icon={<ScanOutlined />}>
+            扫描视频
           </Button>
         </Space>
       </Space>

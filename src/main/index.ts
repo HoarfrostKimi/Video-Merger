@@ -200,6 +200,7 @@ let configCache: AppConfig | null = null
 
 interface AppConfig {
   inputFolder?: string
+  inputFolder2?: string
   outputFolder?: string
   outputFileName?: string
   darkMode?: boolean
@@ -515,8 +516,8 @@ ipcMain.handle('dialog:selectFolder', async () => {
   return { success: true, data: folder }
 })
 
-// 支持的视频格式
-const VIDEO_EXTENSIONS = ['.flv', '.m4s', '.ts', '.blv']
+// 支持的视频格式（不含 .ts：大航海直播会生成 TS 文件，合并会导致文件错误）
+const VIDEO_EXTENSIONS = ['.flv', '.m4s', '.blv']
 
 function isVideoFile(fileName: string): boolean {
   const lower = fileName.toLowerCase()
@@ -743,12 +744,12 @@ async function performScan(
   const hasMergedVideo = (dir: string, date: string, title: string, mergedSet: Set<string>): boolean => {
     const dateLower = date.toLowerCase()
     const titleLower = title.toLowerCase()
-    // 检查 Set 中是否有匹配的已合并文件
     for (const entry of mergedSet) {
       const entryLower = entry.toLowerCase()
-      if (entryLower.startsWith(dateLower) && entryLower.includes(titleLower)) {
-        return true
-      }
+      // 旧格式：2026-07-12_95老阿姨_..._合并版.mp4 → 日期开头 + 包含标题
+      if (entryLower.startsWith(dateLower) && entryLower.includes(titleLower)) return true
+      // 新格式：95老阿姨_2026-07-12.mp4 → 标题开头 + 包含日期
+      if (entryLower.startsWith(titleLower) && entryLower.includes(dateLower)) return true
     }
     return false
   }
@@ -793,9 +794,22 @@ async function performScan(
 }
 
 // IPC 处理器：渲染进程调用扫描
-ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHours: number = 2.5, outputFolder: string = '') => {
+ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHours: number = 2.5, outputFolder: string = '', _unused?: string, folderPath2?: string) => {
   try {
-    const result = await performScan(folderPath, maxIntervalHours, outputFolder, true)
+    let result = await performScan(folderPath, maxIntervalHours, outputFolder, true)
+    if (folderPath2 && folderPath2 !== folderPath) {
+      const result2 = await performScan(folderPath2, maxIntervalHours, outputFolder, true)
+      const allFolders = [...result.folders, ...result2.folders]
+      const merged = new Map<string, typeof result.folders[0]>()
+      for (const f of allFolders) {
+        const existing = merged.get(f.key)
+        if (existing) {
+          existing.fileCount += f.fileCount; existing.totalSize += f.totalSize
+          existing.files.push(...f.files)
+        } else { merged.set(f.key, { ...f }) }
+      }
+      result = { rootPath: folderPath, folders: Array.from(merged.values()) }
+    }
     // 同步扫描结果到控制服务器（手机列表与 App 一致，包含排除列表过滤）
     const latestConfig = loadConfig()
     const hiddenKeys = new Set(latestConfig.hiddenFolderKeys || [])
@@ -1169,11 +1183,13 @@ app.whenReady().then(() => {
   const config = loadConfig()
   // 根据配置设置原生主题（窗口标题栏颜色跟随深色模式）
   nativeTheme.themeSource = config.darkMode ? 'dark' : 'light'
-  setConfigCallbacks(loadConfig, saveConfig)
+  setConfigCallbacks(loadConfig, saveConfig, invalidateConfigCache)
   setFileServerCallback(registerFileForServe)
   setOpenExternalCallback((url: string) => { shell.openExternal(url) })
   // 设置扫描回调：手机控制面板调用扫描时，使用与主 App 完全相同的扫描逻辑
   setScanCallback(async (folderPath: string, maxIntervalHours: number) => {
+    // 强制从磁盘读取最新配置（文件监听器可能漏掉外部编辑，确保手机端始终使用最新配置）
+    invalidateConfigCache()
     const latestCfg = loadConfig()
     const result = await performScan(folderPath, maxIntervalHours, latestCfg.outputFolder || '')
     // 返回全量列表（由调用方自行过滤排除项，用于已排除列表查询）

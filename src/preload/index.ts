@@ -30,7 +30,7 @@ const api = {
   openExternal: (url: string) => invokeApi('dialog:openExternal', url),
 
   // 文件扫描
-scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: string) => invokeApi('scan:flvFiles', folderPath, maxIntervalHours, outputFolder),
+scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: string, _unused?: string, folderPath2?: string) => invokeApi('scan:flvFiles', folderPath, maxIntervalHours, outputFolder, _unused, folderPath2),
 
   // 视频处理
   getVideoInfo: (filePath: string) => invokeApi('video:getInfo', filePath),
