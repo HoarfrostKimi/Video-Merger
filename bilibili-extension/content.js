@@ -14,6 +14,23 @@
     return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
+  /**
+   * 轮询等待某个条件成立（取代「固定 sleep 后直接判定」，避免时序竞态）
+   * @param {() => any} condition 判定函数，返回真值即视为成功
+   * @param {number} [timeout=8000] 最长等待毫秒
+   * @param {number} [interval=300] 轮询间隔
+   * @returns {Promise<any>} 条件成立时的返回值，超时则返回 null
+   */
+  async function waitFor(condition, timeout = 8000, interval = 300) {
+    const start = Date.now()
+    for (;;) {
+      const res = condition()
+      if (res) return res
+      if (Date.now() - start >= timeout) return null
+      await sleep(interval)
+    }
+  }
+
   /** 从文件名解析标题 */
   function parseTitle(fileName) {
     const name = fileName.replace(/\.mp4$/i, '')
@@ -381,6 +398,43 @@
     return bestMatch ? toClickable(bestMatch) : null
   }
 
+  /**
+   * 等待封面真正上传完成（而非死等固定时间）
+   * 判定依据（满足任一即视为完成）：
+   *   1. 弹窗内出现有效预览图（http/https/data 的 img，且已加载出尺寸）
+   *   2. 出现「裁剪 / 完成 / 确定」等下一步按钮且变为可用
+   *   3. 上传中提示（如"上传中""%"）消失
+   * @returns {Promise<boolean>} 是否检测到上传完成
+   */
+  function waitForCoverUploaded(scope, timeout = 15000) {
+    const root = scope || document
+    const isDone = () => {
+      // 仍有"上传中"提示则未完成
+      const uploading = Array.from(root.querySelectorAll('*')).some(el => {
+        const t = (el.textContent || '')
+        return t.length < 30 && (t.includes('上传中') || /上传\s*\d+%/.test(t))
+      })
+      if (uploading) return false
+      // 出现已加载完成的预览图即视为封面已就绪
+      // 本地 blob 预览 / 服务器回显 http 图 / data: 图 都算：
+      // 用户在手动操作时也是「看到预览就点完成」，故允许本地预览作为成功信号
+      const imgs = root.querySelectorAll('img')
+      for (const img of imgs) {
+        const src = img.getAttribute('src') || ''
+        if (/^(blob:|data:|https?:)/.test(src) && img.complete && img.naturalWidth > 50 && img.naturalHeight > 50) return true
+      }
+      return false
+    }
+    if (isDone()) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const obs = new MutationObserver(() => {
+        if (isDone()) { obs.disconnect(); resolve(true) }
+      })
+      obs.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class', 'style'] })
+      setTimeout(() => { obs.disconnect(); resolve(false) }, timeout)
+    })
+  }
+
   /** 点击「完成」按钮并等待封面弹窗关闭 */
   async function confirmCoverDialog(onLog) {
     // 在当前 DOM 中找到封面弹窗（限缩小查找范围）
@@ -391,10 +445,8 @@
     )
     const scope = dialog || document
 
-    await sleep(1500)
-
-    // 在弹窗范围内查找「完成」按钮
-    const doneBtn = findButtonInScope('完成', scope)
+    // 等待「完成」按钮出现（取代固定 1.5s，避免弹窗刚开时按钮尚未渲染）
+    const doneBtn = await waitFor(() => findButtonInScope('完成', scope), 6000)
     if (doneBtn) {
       // 使用 dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
       const rect = doneBtn.getBoundingClientRect()
@@ -441,10 +493,9 @@
   }
 
   /**
-   * Step 5: 设置封面
-   * @param {boolean} skipUpload - 第一个视频跳过截帧上传，直接点完成（B站自动推荐封面）
+   * Step 5: 设置封面（所有视频统一走「视频截帧」封面）
    */
-  async function stepSetCover(file, onLog, skipUpload) {
+  async function stepSetCover(file, onLog) {
     onLog('设置封面...')
 
     // ---- 1. 找到封面设置按钮 ----
@@ -494,18 +545,32 @@
     })
 
     if (!dialog) {
-      onLog('提示: 封面弹窗未出现，跳过'); await sleep(500); return
+      // 重试一次：再点一次封面按钮并等待
+      onLog('封面弹窗未出现，重试一次...')
+      coverBtn.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+      }))
+      const retryDialog = await new Promise((resolve) => {
+        const check = () => document.querySelector(
+          '.el-dialog__wrapper, .el-dialog, ' +
+          '[class*="dialog"]:not([style*="display: none"]), ' +
+          '[class*="modal"]:not([style*="display: none"]), ' +
+          '[class*="coverMaker"], [class*="cover-maker"], [class*="coverDialog"]'
+        )
+        const existing = check()
+        if (existing) return resolve(existing)
+        const obs = new MutationObserver(() => { const d = check(); if (d) { obs.disconnect(); resolve(d) } })
+        obs.observe(document.body, { childList: true, subtree: true })
+        setTimeout(() => { obs.disconnect(); resolve(null) }, 8000)
+      })
+      if (!retryDialog) {
+        onLog('提示: 封面弹窗仍未出现，跳过封面（保留系统默认）'); await sleep(500); return
+      }
     }
     onLog('封面弹窗已打开')
 
-    // ---- 4. 根据 skipUpload 走不同分支 ----
-    if (skipUpload) {
-      onLog('第一个视频，使用系统推荐封面，直接完成')
-      await confirmCoverDialog(onLog)
-      return
-    }
-
-    // ---- 5. 截帧 ----
+    // ---- 4. 截帧 ----
     let frameBlob
     try {
       frameBlob = await captureFrameFromFile(file)
@@ -519,12 +584,11 @@
     const coverFile = new File([frameBlob], 'cover.jpg', { type: 'image/jpeg' })
     onLog(`封面文件: ${coverFile.name}, ${(coverFile.size / 1024).toFixed(0)}KB`)
 
-    // ---- 6. 找到封面上传区域并注入文件 ----
-    await sleep(2000)
-    const uploadArea = Array.from(document.querySelectorAll('*')).find(el => {
+    // ---- 5. 找到封面上传区域并注入文件（等待出现，最多 8s，避免弹窗未渲染就跳过）----
+    const uploadArea = await waitFor(() => Array.from(document.querySelectorAll('*')).find(el => {
       const text = el.textContent
       return text.includes('上传封面') && text.includes('拖拽图片') && el.children.length <= 5
-    })
+    }), 8000)
 
     if (!uploadArea) {
       onLog('提示: 未找到上传区域，请手动上传')
@@ -533,8 +597,11 @@
     }
     onLog('找到上传封面区域')
 
-    const allInputs = document.querySelectorAll('input[type="file"]')
-    const coverInput = Array.from(allInputs).find(inp => (inp.getAttribute('accept') || '').toLowerCase().includes('image'))
+    // 等待封面 file input 出现（最多 5s）—— 注入前确保元素已挂载
+    const coverInput = await waitFor(() => {
+      const allInputs = document.querySelectorAll('input[type="file"]')
+      return Array.from(allInputs).find(inp => (inp.getAttribute('accept') || '').toLowerCase().includes('image'))
+    }, 5000)
 
     if (!coverInput) {
       onLog('提示: 未找到封面 input (accept 含 image)，请手动上传')
@@ -544,15 +611,23 @@
 
     onLog(`找到封面 input: accept="${coverInput.getAttribute('accept')}"`)
     setFileToInput(coverInput, coverFile)
-    onLog('已设置封面文件')
+    onLog('已设置封面文件，等待上传完成...')
 
-    // ---- 7. 等待上传并确认 ----
-    await sleep(5000)
-    const hasPreview = document.querySelector('img[src*="blob:"], img[src*="http"], canvas, img[src*="data:"]')
-    if (hasPreview) {
-      onLog('封面上传成功，预览图已显示')
+    // ---- 6. 真正等待封面上传完成（最多 30s），而非死等固定时间 ----
+    const uploadDialog = document.querySelector(
+      '.el-dialog__wrapper:not([style*="display: none"]), ' +
+      '[class*="coverDialog"]:not([style*="display: none"]), ' +
+      '[class*="cover-maker"]:not([style*="display: none"])'
+    )
+    const uploaded = await waitForCoverUploaded(uploadDialog || document, 15000)
+    if (uploaded) {
+      onLog('封面上传完成，预览图已显示')
     } else {
-      onLog('警告: 未检测到封面预览')
+      // 超时兜底：再宽限一次，仍未完成则提示但继续（避免整批卡死）
+      onLog('警告: 15s 内未确认封面上传完成，再宽限 5s...')
+      await sleep(5000)
+      const hasPreview = (uploadDialog || document).querySelector('img[src^="blob:"], img[src^="http"], img[src^="data:"]')
+      onLog(hasPreview ? '检测到封面预览' : '警告: 仍未检测到封面预览，可能上传较慢')
     }
 
     await confirmCoverDialog(onLog)
@@ -597,8 +672,8 @@
     // Step 4: 设置可见范围
     await stepSetVisibility(onLog, targetText)
 
-    // Step 5: 设置封面（第一个视频跳过截帧，B站自动推荐）
-    await stepSetCover(file, onLog, true)
+    // Step 5: 设置封面（截取视频帧作为自定义封面）
+    await stepSetCover(file, onLog)
 
     // Step 6: 提交
     await stepSubmit(onLog)
@@ -607,8 +682,6 @@
     onLog(`《${title}》处理完成`)
     return { title, success: true }
   }
-
-  // (uploadViaAddPart 和 clickNextVideoInQueue 已移除——功能内联在 batchUpload 中)
 
   /**
    * 批量上传：第一个视频正常上传，后续点击队列卡片进入编辑页面再上传
