@@ -398,17 +398,114 @@
     return bestMatch ? toClickable(bestMatch) : null
   }
 
+  /** 已知封面弹窗 CSS 选择器（向后兼容旧版 B站 UI） */
+  const COVER_DIALOG_SELECTOR =
+    '.el-dialog__wrapper:not([style*="display: none"]), ' +
+    '.el-dialog:not([style*="display: none"]), ' +
+    '[class*="coverMaker"]:not([style*="display: none"]), ' +
+    '[class*="cover-maker"]:not([style*="display: none"]), ' +
+    '[class*="coverDialog"]:not([style*="display: none"]), ' +
+    '[class*="cover-dialog"]:not([style*="display: none"]), ' +
+    '[class*="cover-modal"]:not([style*="display: none"])'
+
   /**
-   * 等待封面真正上传完成（而非死等固定时间）
-   * 判定依据（满足任一即视为完成）：
-   *   1. 弹窗内出现有效预览图（http/https/data 的 img，且已加载出尺寸）
-   *   2. 出现「裁剪 / 完成 / 确定」等下一步按钮且变为可用
-   *   3. 上传中提示（如"上传中""%"）消失
-   * @returns {Promise<boolean>} 是否检测到上传完成
+   * 通过内容特征检测封面弹窗（不依赖特定 class 名，兼容 B站 UI 改版）。
+   * 策略：
+   *   1. 先尝试已知 CSS 选择器
+   *   2. 若失败，查找含封面上传特征（image file input / "上传封面" / "拖拽图片"）的弹窗容器
+   * @returns {Element|null}
    */
-  function waitForCoverUploaded(scope, timeout = 15000) {
-    const root = scope || document
+  function findCoverDialog() {
+    // 1. 已知选择器（兼容旧版）
+    const known = document.querySelector(COVER_DIALOG_SELECTOR)
+    if (known) return known
+
+    // 2. 内容特征检测：找到封面相关的 file input 或上传提示文本，向上追溯弹窗容器
+    const candidates = []
+
+    // 2a. 通过 image file input 定位
+    const imgInputs = document.querySelectorAll('input[type="file"][accept*="image"], input[type="file"][accept*="jpg"], input[type="file"][accept*="png"]')
+    for (const inp of imgInputs) {
+      if (inp.offsetParent !== null || inp.closest('[style*="display: none"]') === null) {
+        candidates.push(inp)
+      }
+    }
+
+    // 2b. 通过文本特征定位（"上传封面"、"拖拽图片"、"更换封面"、"裁剪"、"封面裁剪"）
+    if (candidates.length === 0) {
+      const allEls = document.querySelectorAll('div, section, aside')
+      for (const el of allEls) {
+        const text = el.textContent || ''
+        if (text.length < 500 && (
+          text.includes('上传封面') || text.includes('拖拽图片') || text.includes('更换封面') ||
+          text.includes('封面裁剪') || text.includes('裁剪封面') ||
+          (text.includes('封面') && text.includes('裁剪'))
+        )) {
+          candidates.push(el)
+        }
+      }
+    }
+
+    // 2c. 通过 canvas 元素定位（B站新版封面裁剪用 canvas 预览）
+    if (candidates.length === 0) {
+      const canvases = document.querySelectorAll('canvas')
+      for (const cvs of canvases) {
+        const style = window.getComputedStyle(cvs)
+        if (style.display !== 'none' && cvs.width > 100 && cvs.height > 100) {
+          candidates.push(cvs)
+        }
+      }
+    }
+
+    // 从候选元素向上查找弹窗/遮罩容器
+    for (const el of candidates) {
+      let node = el
+      while (node && node !== document.body) {
+        const style = window.getComputedStyle(node)
+        const cls = (node.className || '').toString().toLowerCase()
+        const zIndex = parseInt(style.zIndex) || 0
+        const isOverlay = (
+          style.position === 'fixed' || style.position === 'absolute' ||
+          cls.includes('dialog') || cls.includes('modal') || cls.includes('overlay') ||
+          cls.includes('popup') || cls.includes('drawer') || cls.includes('mask') ||
+          cls.includes('crop') || cls.includes('cover') ||
+          node.getAttribute('role') === 'dialog' || node.getAttribute('role') === 'alertdialog' ||
+          zIndex > 50
+        )
+        if (isOverlay && style.display !== 'none' && style.visibility !== 'hidden') {
+          return node
+        }
+        node = node.parentElement
+      }
+    }
+
+    // 3. 兜底：查找任何 fixed/absolute 遮罩层（z-index > 50）内含封面相关内容
+    const allContainers = document.querySelectorAll('div, section, aside, article')
+    for (const ov of allContainers) {
+      const style = window.getComputedStyle(ov)
+      if (style.position !== 'fixed' && style.position !== 'absolute') continue
+      if (style.display === 'none' || style.visibility === 'hidden') continue
+      const zIndex = parseInt(style.zIndex) || 0
+      if (zIndex < 50) continue
+      const text = ov.textContent || ''
+      if (text.includes('封面') || text.includes('裁剪') || ov.querySelector('input[type="file"], canvas, img[src^="blob:"]')) {
+        return ov
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * 等待封面上传完成。
+   * 使用 findCoverDialog() 动态定位弹窗，避免 Vue 重渲染导致引用失效。
+   * @param {number} timeout
+   * @returns {Promise<boolean>}
+   */
+  function waitForCoverUploaded(timeout = 15000) {
+    const getRoot = () => findCoverDialog() || document
     const isDone = () => {
+      const root = getRoot()
       // 仍有"上传中"提示则未完成
       const uploading = Array.from(root.querySelectorAll('*')).some(el => {
         const t = (el.textContent || '')
@@ -427,10 +524,11 @@
     }
     if (isDone()) return Promise.resolve(true)
     return new Promise((resolve) => {
+      // 监听 document.body（稳定节点），而非可能被 Vue patch 替换的弹窗元素
       const obs = new MutationObserver(() => {
         if (isDone()) { obs.disconnect(); resolve(true) }
       })
-      obs.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class', 'style'] })
+      obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class', 'style'] })
       setTimeout(() => { obs.disconnect(); resolve(false) }, timeout)
     })
   }
@@ -438,16 +536,26 @@
   /** 点击「完成」按钮并等待封面弹窗关闭 */
   async function confirmCoverDialog(onLog) {
     // 在当前 DOM 中找到封面弹窗（限缩小查找范围）
-    const dialog = document.querySelector(
-      '.el-dialog__wrapper:not([style*="display: none"]), ' +
-      '[class*="coverDialog"]:not([style*="display: none"]), ' +
-      '[class*="cover-maker"]:not([style*="display: none"])'
-    )
+    const dialog = findCoverDialog()
     const scope = dialog || document
 
     // 等待「完成」按钮出现（取代固定 1.5s，避免弹窗刚开时按钮尚未渲染）
     const doneBtn = await waitFor(() => findButtonInScope('完成', scope), 6000)
     if (doneBtn) {
+      // 等待按钮变为可用（B站在上传/裁剪未完成时会 disable 按钮）
+      const isBtnEnabled = (btn) => {
+        if (btn.disabled) return false
+        if (btn.getAttribute('aria-disabled') === 'true') return false
+        if (btn.classList.contains('is-disabled') || btn.classList.contains('disabled')) return false
+        // 检查父级（有时 disabled 状态挂在父容器上）
+        const parent = btn.closest('[class*="disabled"]')
+        if (parent && parent.contains(btn)) return false
+        return true
+      }
+      const enabled = await waitFor(() => isBtnEnabled(doneBtn) ? doneBtn : null, 10000)
+      if (!enabled) {
+        onLog('警告: 「完成」按钮 10s 后仍为禁用状态，强制点击')
+      }
       // 使用 dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
       const rect = doneBtn.getBoundingClientRect()
       doneBtn.dispatchEvent(new MouseEvent('click', {
@@ -458,21 +566,31 @@
       onLog('封面设置完成')
 
       // 验证弹窗是否真的关闭了（最多等 5 秒）
+      // B站可能通过移除 DOM、display:none、visibility:hidden 等方式关闭弹窗
+      const isDialogGone = (el) => {
+        if (!el || !document.body.contains(el)) return true
+        const style = el.style
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return true
+        const computed = window.getComputedStyle(el)
+        if (computed.display === 'none' || computed.visibility === 'hidden') return true
+        return false
+      }
       if (dialog) {
         await new Promise((resolve) => {
           let tries = 0
           const check = () => {
             tries++
-            if (!document.body.contains(dialog) || tries > 20) resolve()
+            if (isDialogGone(dialog) || tries > 20) resolve()
             else setTimeout(check, 250)
           }
           check()
         })
-        if (document.body.contains(dialog)) {
+        if (!isDialogGone(dialog)) {
           onLog('警告: 封面弹窗似乎未关闭，将重试...')
           await sleep(500)
-          // 重试一次
-          const retryBtn = findButtonInScope('完成', dialog)
+          // 重试：动态查询当前弹窗（Vue 可能已替换节点）
+          const currentDialog = findCoverDialog() || dialog
+          const retryBtn = findButtonInScope('完成', currentDialog)
           if (retryBtn) {
             const r = retryBtn.getBoundingClientRect()
             retryBtn.dispatchEvent(new MouseEvent('click', {
@@ -529,44 +647,41 @@
     }))
     onLog('已点击封面设置，等待弹窗...')
 
-    // ---- 3. 等待弹窗出现 ----
-    const dialog = await new Promise((resolve) => {
-      const check = () => document.querySelector(
-        '.el-dialog__wrapper, .el-dialog, ' +
-        '[class*="dialog"]:not([style*="display: none"]), ' +
-        '[class*="modal"]:not([style*="display: none"]), ' +
-        '[class*="coverMaker"], [class*="cover-maker"], [class*="coverDialog"]'
-      )
+    // ---- 3. 等待弹窗出现（使用内容特征检测，兼容 B站 UI 改版）----
+    // B站需先获取视频元数据再显示裁剪界面，网络慢时可能需要较长时间
+    const waitForDialog = (timeout) => new Promise((resolve) => {
+      const check = () => findCoverDialog()
       const existing = check()
       if (existing) return resolve(existing)
       const obs = new MutationObserver(() => { const d = check(); if (d) { obs.disconnect(); resolve(d) } })
-      obs.observe(document.body, { childList: true, subtree: true })
-      setTimeout(() => { obs.disconnect(); resolve(null) }, 10000)
+      obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] })
+      setTimeout(() => { obs.disconnect(); resolve(null) }, timeout)
     })
 
+    let dialog = await waitForDialog(15000)
+
     if (!dialog) {
-      // 重试一次：再点一次封面按钮并等待
-      onLog('封面弹窗未出现，重试一次...')
+      // 重试：再点一次封面按钮并等待
+      onLog('封面弹窗未出现，重试(2/3)...')
       coverBtn.dispatchEvent(new MouseEvent('click', {
         bubbles: true, cancelable: true, view: window,
         clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
       }))
-      const retryDialog = await new Promise((resolve) => {
-        const check = () => document.querySelector(
-          '.el-dialog__wrapper, .el-dialog, ' +
-          '[class*="dialog"]:not([style*="display: none"]), ' +
-          '[class*="modal"]:not([style*="display: none"]), ' +
-          '[class*="coverMaker"], [class*="cover-maker"], [class*="coverDialog"]'
-        )
-        const existing = check()
-        if (existing) return resolve(existing)
-        const obs = new MutationObserver(() => { const d = check(); if (d) { obs.disconnect(); resolve(d) } })
-        obs.observe(document.body, { childList: true, subtree: true })
-        setTimeout(() => { obs.disconnect(); resolve(null) }, 8000)
-      })
-      if (!retryDialog) {
-        onLog('提示: 封面弹窗仍未出现，跳过封面（保留系统默认）'); await sleep(500); return
-      }
+      dialog = await waitForDialog(12000)
+    }
+
+    if (!dialog) {
+      // 第三次重试：B站可能因 getMeta 超时而延迟显示
+      onLog('封面弹窗仍未出现，重试(3/3)...')
+      coverBtn.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+      }))
+      dialog = await waitForDialog(10000)
+    }
+
+    if (!dialog) {
+      onLog('警告: 封面弹窗三次尝试后仍未出现，跳过封面'); await sleep(500); return
     }
     onLog('封面弹窗已打开')
 
@@ -613,20 +728,16 @@
     setFileToInput(coverInput, coverFile)
     onLog('已设置封面文件，等待上传完成...')
 
-    // ---- 6. 真正等待封面上传完成（最多 30s），而非死等固定时间 ----
-    const uploadDialog = document.querySelector(
-      '.el-dialog__wrapper:not([style*="display: none"]), ' +
-      '[class*="coverDialog"]:not([style*="display: none"]), ' +
-      '[class*="cover-maker"]:not([style*="display: none"])'
-    )
-    const uploaded = await waitForCoverUploaded(uploadDialog || document, 15000)
+    // ---- 6. 真正等待封面上传完成（动态查询弹窗，避免 Vue 重渲染导致引用失效）----
+    const uploaded = await waitForCoverUploaded(15000)
     if (uploaded) {
       onLog('封面上传完成，预览图已显示')
     } else {
       // 超时兜底：再宽限一次，仍未完成则提示但继续（避免整批卡死）
       onLog('警告: 15s 内未确认封面上传完成，再宽限 5s...')
       await sleep(5000)
-      const hasPreview = (uploadDialog || document).querySelector('img[src^="blob:"], img[src^="http"], img[src^="data:"]')
+      const currentDialog = findCoverDialog() || document
+      const hasPreview = currentDialog.querySelector('img[src^="blob:"], img[src^="http"], img[src^="data:"]')
       onLog(hasPreview ? '检测到封面预览' : '警告: 仍未检测到封面预览，可能上传较慢')
     }
 
