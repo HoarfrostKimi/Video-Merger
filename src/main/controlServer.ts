@@ -4,7 +4,8 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
 import { networkInterfaces } from 'os'
 import { join, basename } from 'path'
-import { writeFileSync, createReadStream, statSync, existsSync } from 'fs'
+import { writeFileSync, createReadStream, statSync, existsSync, readdirSync } from 'fs'
+import { shell } from 'electron'
 import { mergeVideos } from './ffmpeg'
 import * as mergedFiles from './mergedFiles'
 import { invalidateCache } from './mergedFiles'
@@ -397,6 +398,180 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   // POST /api/merged-files/remove 和 /api/merged-files/clear 已移除
   // 投稿列表现在是输出文件夹的实时扫描，不再维护内存列表
+
+  // POST /api/segments/delete - 删除分组的所有文件：分段源文件 + 已合并的 MP4（移至回收站）
+  if (path === '/api/segments/delete' && method === 'POST') {
+    try {
+      const body = JSON.parse(await readBody(req))
+      const groups: Array<{ key: string; folderName: string; date: string; title: string; files: Array<{ path: string }> }> = body.groups
+      if (!groups || groups.length === 0) {
+        sendJson(res, 400, { error: '未指定要删除的分组' })
+        return
+      }
+
+      if (loadConfigFn) configRef = loadConfigFn()
+      const outputFolder = configRef.outputFolder || ''
+
+      let totalSegmentsDeleted = 0
+      let totalMp4Deleted = 0
+      const deletedGroups: string[] = []
+
+      // 一次性扫描输出文件夹中的所有 MP4
+      let outputMp4s: string[] = []
+      if (outputFolder && existsSync(outputFolder)) {
+        try {
+          outputMp4s = readdirSync(outputFolder).filter((f) => f.toLowerCase().endsWith('.mp4'))
+        } catch { /* 忽略 */ }
+      }
+
+      for (const group of groups) {
+        const liveDate = group.date || ''
+        const liveTitle = group.title || ''
+        const dateLower = liveDate.toLowerCase()
+        const titleLower = liveTitle.toLowerCase()
+
+        // 1. 删除分段源文件
+        for (const file of group.files) {
+          try {
+            if (existsSync(file.path)) {
+              await shell.trashItem(file.path)
+              totalSegmentsDeleted++
+            }
+          } catch (e) {
+            console.warn('[ControlServer] 分段文件移至回收站失败:', file.path, e)
+          }
+        }
+
+        // 2. 查找并删除已合并的 MP4
+        for (const mp4Name of outputMp4s) {
+          const mp4Lower = mp4Name.toLowerCase()
+          let matched = false
+          if (dateLower && titleLower && mp4Lower.startsWith(dateLower) && mp4Lower.includes(titleLower)) matched = true
+          if (dateLower && titleLower && mp4Lower.startsWith(titleLower) && mp4Lower.includes(dateLower)) matched = true
+          if (matched) {
+            try {
+              await shell.trashItem(join(outputFolder, mp4Name))
+              outputMp4s = outputMp4s.filter((n) => n !== mp4Name)
+              totalMp4Deleted++
+            } catch (e) {
+              console.warn('[ControlServer] MP4 移至回收站失败:', mp4Name, e)
+            }
+          }
+        }
+
+        deletedGroups.push(group.folderName)
+      }
+
+      // 使缓存失效
+      invalidateCache()
+      videoFileCache.clear()
+      cachedMergedFilesTime = 0
+
+      // 重新扫描以更新分组列表
+      const inputFolder = configRef.inputFolder
+      const maxInterval = configRef.maxIntervalHours || 2.5
+      if (inputFolder && scanFromMainApp) {
+        lastGroups = await scanFromMainApp(inputFolder, maxInterval)
+        const folder2 = configRef.inputFolder2
+        if (folder2 && folder2 !== inputFolder) {
+          const groups2 = await scanFromMainApp(folder2, maxInterval)
+          const mergedMap = new Map<string, VideoGroup>()
+          for (const g of [...lastGroups, ...groups2]) {
+            const existing = mergedMap.get(g.key)
+            if (existing) { existing.fileCount += g.fileCount; existing.totalSize += g.totalSize; existing.files.push(...g.files) }
+            else { mergedMap.set(g.key, { ...g }) }
+          }
+          lastGroups = Array.from(mergedMap.values())
+        }
+        // 应用排除列表
+        const hiddenKeys = new Set((configRef.hiddenFolderKeys || []))
+        lastGroups = lastGroups.filter((g) => !hiddenKeys.has(g.key))
+      }
+
+      console.log(`[ControlServer] 已删除 ${deletedGroups.length} 个分组，分段 ${totalSegmentsDeleted} 个 + MP4 ${totalMp4Deleted} 个`)
+      sendJson(res, 200, { success: true, groupCount: deletedGroups.length, segmentCount: totalSegmentsDeleted, mp4Count: totalMp4Deleted, groups: lastGroups })
+    } catch (e: unknown) {
+      console.error('[ControlServer] 删除分组失败:', e)
+      sendJson(res, 500, { error: String(e) })
+    }
+    return
+  }
+
+  // POST /api/merged-files/delete - 删除已合并 MP4 及对应分段文件（移至回收站）
+  if (path === '/api/merged-files/delete' && method === 'POST') {
+    try {
+      const body = JSON.parse(await readBody(req))
+      const fileName: string = body.fileName
+      if (!fileName) {
+        sendJson(res, 400, { error: '未指定文件名' })
+        return
+      }
+
+      if (loadConfigFn) configRef = loadConfigFn()
+      const outputFolder = configRef.outputFolder || ''
+      const inputFolder = configRef.inputFolder || ''
+      const inputFolder2 = configRef.inputFolder2 || ''
+
+      const mp4Path = join(outputFolder, fileName)
+      if (!existsSync(mp4Path)) {
+        sendJson(res, 404, { error: '文件不存在' })
+        return
+      }
+
+      // 从 MP4 文件名提取日期和标题
+      let liveDate = ''
+      let liveTitle = ''
+      let m = fileName.match(/^(.+?)_(\d{4}-\d{2}-\d{2})\.mp4$/i)
+      if (m) { liveTitle = m[1]; liveDate = m[2] }
+      else { m = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/); if (m) { liveDate = m[1]; liveTitle = m[2] } }
+
+      // 查找匹配的分段文件
+      const VIDEO_EXTS = ['.flv', '.m4s', '.blv']
+      const isVideoFile = (name: string): boolean => VIDEO_EXTS.some(ext => name.toLowerCase().endsWith(ext))
+      const stripVideoExt = (name: string): string => { let n = name; for (const ext of VIDEO_EXTS) { if (n.toLowerCase().endsWith(ext)) return n.slice(0, -ext.length) } return n }
+      const parseSegName = (name: string): { date: string; title: string } => {
+        const noExt = stripVideoExt(name).replace(/_PART\d+$/i, '')
+        const match = noExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
+        if (match) return { date: match[1], title: match[3].trim() || '未命名' }
+        return { date: '未知日期', title: noExt.trim() || '未命名' }
+      }
+      const segmentFiles: string[] = []
+      const findSegments = (dir: string): void => {
+        if (!dir || !existsSync(dir)) return
+        try {
+          const entries = readdirSync(dir, { withFileTypes: true })
+          for (const entry of entries) {
+            const fullPath = join(dir, entry.name)
+            if (entry.isDirectory() && !entry.name.startsWith('.')) findSegments(fullPath)
+            else if (entry.isFile() && isVideoFile(entry.name)) {
+              const parsed = parseSegName(entry.name)
+              if (parsed.date === liveDate && parsed.title === liveTitle) segmentFiles.push(fullPath)
+            }
+          }
+        } catch { /* 跳过 */ }
+      }
+      findSegments(inputFolder)
+      if (inputFolder2 && inputFolder2 !== inputFolder) findSegments(inputFolder2)
+
+      // 移至回收站
+      await shell.trashItem(mp4Path)
+      let segDeleted = 0
+      for (const segPath of segmentFiles) {
+        try { await shell.trashItem(segPath); segDeleted++ } catch (e) { console.warn('[ControlServer] 分段移至回收站失败:', segPath, e) }
+      }
+
+      invalidateCache()
+      videoFileCache.clear()
+      cachedMergedFilesTime = 0
+
+      console.log(`[ControlServer] 已删除 ${fileName} + ${segDeleted} 个分段文件`)
+      sendJson(res, 200, { success: true, segmentCount: segDeleted })
+    } catch (e: unknown) {
+      console.error('[ControlServer] 删除失败:', e)
+      sendJson(res, 500, { error: String(e) })
+    }
+    return
+  }
 
   // GET /api/groups
   if (path === '/api/groups' && method === 'GET') {
@@ -1308,6 +1483,7 @@ function renderGroups() {
         '<div class="group-meta">' + g.fileCount + ' 个文件 | ' + sizeMB + ' MB</div>' +
       '</div>' +
       '<button class="btn btn-danger" onclick="doExcludeSingle(\\'' + g.key + '\\')" style="flex-shrink:0;margin-left:8px;font-size:12px;padding:6px 10px;min-height:auto">排除</button>' +
+      '<button class="btn btn-danger" onclick="doDeleteSegments(\\'' + g.key + '\\')" style="flex-shrink:0;margin-left:4px;font-size:12px;padding:6px 10px;min-height:auto;background:#ff7875">删除</button>' +
     '</div>';
   }).join('');
 }
@@ -1392,6 +1568,25 @@ async function doExcludeSingle(key) {
     groups = data.groups || []; selectedKeys.clear(); renderGroups(); updateBatchBtn();
     toast('已排除');
   } catch (e) { toast('排除失败'); }
+}
+
+// === 删除分组的所有文件（分段+已合并MP4） ===
+async function doDeleteSegments(key) {
+  var g = groups.find(function(item) { return item.key === key; });
+  if (!g) return;
+  if (!confirm('确定删除此分组的所有文件？\\n' + g.folderName + '（' + g.fileCount + ' 个分段 + 已合并MP4）\\n文件将移至回收站')) return;
+  toast('正在删除...');
+  try {
+    var data = await api('POST', '/api/segments/delete', {
+      groups: [{ key: g.key, folderName: g.folderName, date: g.date, title: g.title, files: g.files.map(function(f) { return { path: f.path }; }) }]
+    });
+    if (data && data.error) { toast(data.error); return; }
+    groups = data.groups || []; selectedKeys.clear(); renderGroups(); updateBatchBtn();
+    var parts = [];
+    if (data.segmentCount > 0) parts.push(data.segmentCount + ' 个分段');
+    if (data.mp4Count > 0) parts.push(data.mp4Count + ' 个合并视频');
+    toast('已删除：' + (parts.join('、') || '无文件'));
+  } catch (e) { toast('删除失败'); }
 }
 
 async function doExclude() {
@@ -1485,6 +1680,7 @@ function renderUploadList() {
       '<input type="checkbox" class="group-check" ' + checked + ' onchange="toggleUploadSelect(' + i + ', this.checked)">' +
       '<div class="group-info"><div class="group-name">' + escHtml(formatUploadName(f.name)) + '</div><div class="group-meta">' + formatMtime(f.mtime) + '</div></div>' +
       '<span onclick="openVideoPreview(\\\'' + escHtml(f.name) + '\\\')" style="font-size:18px;padding:8px;cursor:pointer;flex-shrink:0" title="预览">▶️</span>' +
+      '<span onclick="doDeleteMergedFile(\\\'' + escHtml(f.name) + '\\\')" style="font-size:16px;padding:8px;cursor:pointer;flex-shrink:0;color:#ff4d4f" title="删除">🗑️</span>' +
     '</div>';
   }).join('');
 
@@ -1552,6 +1748,19 @@ async function doUploadSelected() {
     uploadSelectedKeys.clear();
     await loadMergedFiles();
   } catch (e) { toast('投稿失败'); }
+}
+
+// === 删除已合并 MP4 及对应分段文件 ===
+async function doDeleteMergedFile(fileName) {
+  if (!confirm('确定删除此视频？\\n将同时删除对应的分段源文件（移至回收站）')) return;
+  toast('正在删除...');
+  try {
+    var data = await api('POST', '/api/merged-files/delete', { fileName: fileName });
+    if (data && data.error) { toast(data.error); return; }
+    var segCount = data ? data.segmentCount : 0;
+    toast('已删除，清理了 ' + segCount + ' 个分段文件');
+    await loadMergedFiles();
+  } catch (e) { toast('删除失败'); }
 }
 
 // === 设置 ===

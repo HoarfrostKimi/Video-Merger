@@ -64,6 +64,10 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: str
   // 已合并文件（投稿页）
   getMergedFiles: () => invokeApi('mergedFiles:get'),
   uploadMergedFiles: (filePaths: string[]) => invokeApi('mergedFiles:upload', filePaths),
+  deleteMergedFile: (fileName: string) => invokeApi('mergedFiles:delete', fileName),
+
+  // 删除分组的所有文件（分段+已合并MP4）
+  deleteSegments: (groups: Array<{ key: string; folderName: string; date: string; title: string; files: Array<{ path: string }> }>) => invokeApi('segments:delete', groups),
 
   // 后台运行
   minimizeToTray: () => invokeApi('window:minimizeToTray'),

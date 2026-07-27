@@ -1128,8 +1128,165 @@ ipcMain.handle('mergedFiles:get', () => {
   return { success: true, data: files }
 })
 
-// 23. 已移除：投稿列表现在是输出文件夹的实时扫描，不支持从列表移除
-// 24. 已移除：同上
+// 22b. 删除分组的所有文件：分段源文件 + 已合并的 MP4（移至回收站）
+ipcMain.handle('segments:delete', async (_event, groups: Array<{ key: string; folderName: string; date: string; title: string; files: Array<{ path: string }> }>) => {
+  try {
+    if (!groups || groups.length === 0) {
+      return { success: false, message: '未指定要删除的分组' }
+    }
+
+    const config = loadConfig()
+    const outputFolder = config.outputFolder || ''
+
+    let totalSegmentsDeleted = 0
+    let totalMp4Deleted = 0
+    const deletedGroups: string[] = []
+
+    // 一次性扫描输出文件夹中的所有 MP4
+    let outputMp4s: string[] = []
+    if (outputFolder && existsSync(outputFolder)) {
+      try {
+        outputMp4s = readdirSync(outputFolder).filter((f) => f.toLowerCase().endsWith('.mp4'))
+      } catch { /* 忽略 */ }
+    }
+
+    for (const group of groups) {
+      const liveDate = group.date || ''
+      const liveTitle = group.title || ''
+      const dateLower = liveDate.toLowerCase()
+      const titleLower = liveTitle.toLowerCase()
+
+      // 1. 删除分段源文件
+      for (const file of group.files) {
+        try {
+          if (existsSync(file.path)) {
+            await shell.trashItem(file.path)
+            totalSegmentsDeleted++
+          }
+        } catch (e) {
+          console.warn('[delete] 分段文件移至回收站失败:', file.path, e)
+        }
+      }
+
+      // 2. 查找并删除已合并的 MP4（新旧两种命名格式）
+      for (const mp4Name of outputMp4s) {
+        const mp4Lower = mp4Name.toLowerCase()
+        let matched = false
+        // 旧格式：2026-07-12_95老阿姨_..._合并版.mp4 → 日期开头 + 包含标题
+        if (dateLower && titleLower && mp4Lower.startsWith(dateLower) && mp4Lower.includes(titleLower)) {
+          matched = true
+        }
+        // 新格式：95老阿姨_2026-07-12.mp4 → 标题开头 + 包含日期
+        if (dateLower && titleLower && mp4Lower.startsWith(titleLower) && mp4Lower.includes(dateLower)) {
+          matched = true
+        }
+        if (matched) {
+          try {
+            await shell.trashItem(join(outputFolder, mp4Name))
+            outputMp4s = outputMp4s.filter((n) => n !== mp4Name) // 避免重复删除
+            totalMp4Deleted++
+          } catch (e) {
+            console.warn('[delete] MP4 移至回收站失败:', mp4Name, e)
+          }
+        }
+      }
+
+      deletedGroups.push(group.folderName)
+    }
+
+    // 使扫描缓存失效，让列表刷新
+    scanCache.clear()
+    mergedFiles.invalidateCache()
+
+    console.log(`[delete] 已删除 ${deletedGroups.length} 个分组，分段 ${totalSegmentsDeleted} 个 + MP4 ${totalMp4Deleted} 个`)
+    return {
+      success: true,
+      data: { groupCount: deletedGroups.length, segmentCount: totalSegmentsDeleted, mp4Count: totalMp4Deleted, deletedGroups }
+    }
+  } catch (error: any) {
+    console.error('[delete] 删除分组失败:', error)
+    return { success: false, message: error.message || '删除失败' }
+  }
+})
+
+// 23. 删除已合并 MP4 及其对应的分段源文件（移至回收站）
+ipcMain.handle('mergedFiles:delete', async (_event, fileName: string) => {
+  try {
+    const config = loadConfig()
+    const outputFolder = config.outputFolder || ''
+    const inputFolder = config.inputFolder || ''
+    const inputFolder2 = config.inputFolder2 || ''
+
+    const mp4Path = join(outputFolder, fileName)
+    if (!existsSync(mp4Path)) {
+      return { success: false, message: '文件不存在' }
+    }
+
+    // 从 MP4 文件名提取日期和标题
+    let liveDate = ''
+    let liveTitle = ''
+    let m = fileName.match(/^(.+?)_(\d{4}-\d{2}-\d{2})\.mp4$/i)
+    if (m) {
+      liveTitle = m[1]
+      liveDate = m[2]
+    } else {
+      m = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/)
+      if (m) {
+        liveDate = m[1]
+        liveTitle = m[2]
+      }
+    }
+
+    // 在输入文件夹中递归查找匹配的分段文件
+    const segmentFiles: string[] = []
+    const parseFileName = (name: string): { date: string; title: string } => {
+      const nameWithoutExt = stripVideoExtension(name).replace(/_PART\d+$/i, '')
+      const match = nameWithoutExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
+      if (match) return { date: match[1], title: match[3].trim() || '未命名' }
+      return { date: '未知日期', title: nameWithoutExt.trim() || '未命名' }
+    }
+    const findSegments = (dir: string): void => {
+      if (!dir || !existsSync(dir)) return
+      try {
+        const entries = readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          const fullPath = join(dir, entry.name)
+          if (entry.isDirectory() && !entry.name.startsWith('.')) {
+            findSegments(fullPath)
+          } else if (entry.isFile() && isVideoFile(entry.name)) {
+            const parsed = parseFileName(entry.name)
+            if (parsed.date === liveDate && parsed.title === liveTitle) {
+              segmentFiles.push(fullPath)
+            }
+          }
+        }
+      } catch { /* 跳过 */ }
+    }
+    findSegments(inputFolder)
+    if (inputFolder2 && inputFolder2 !== inputFolder) findSegments(inputFolder2)
+
+    // 移至回收站：先 MP4，再分段
+    await shell.trashItem(mp4Path)
+    let segDeleted = 0
+    for (const segPath of segmentFiles) {
+      try {
+        await shell.trashItem(segPath)
+        segDeleted++
+      } catch (e) {
+        console.warn('[delete] 分段文件移至回收站失败:', segPath, e)
+      }
+    }
+
+    mergedFiles.invalidateCache()
+    console.log(`[delete] 已删除 MP4 + ${segDeleted} 个分段文件`)
+    return { success: true, data: { segmentCount: segDeleted } }
+  } catch (error: any) {
+    console.error('[delete] 删除失败:', error)
+    return { success: false, message: error.message || '删除失败' }
+  }
+})
+
+// 24. 已移除：投稿列表现在是输出文件夹的实时扫描，不支持从列表移除
 
 // 25. 获取网络信息（已由 18b 注册，不再重复）
 

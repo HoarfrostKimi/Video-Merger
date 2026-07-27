@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
-import { Button, Modal, Progress, Space, Table, Tag, Typography } from 'antd'
-import { UploadOutlined, CheckCircleOutlined, SyncOutlined, CloseCircleOutlined } from '@ant-design/icons'
+import { Button, Modal, Progress, Space, Table, Tag, Typography, Popconfirm } from 'antd'
+import { UploadOutlined, CheckCircleOutlined, SyncOutlined, CloseCircleOutlined, DeleteOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { formatUploadName, formatTime } from '../utils/format'
 
@@ -25,6 +25,7 @@ interface UploadModalProps {
   onSelectChange: (keys: React.Key[]) => void
   onUpload: (selectedPaths: string[]) => Promise<void>
   onLoadFiles: () => void
+  onDelete: (fileName: string) => Promise<void>
 }
 
 const UploadModal: React.FC<UploadModalProps> = React.memo(({
@@ -37,7 +38,8 @@ const UploadModal: React.FC<UploadModalProps> = React.memo(({
   selectedKeys,
   onClose,
   onSelectChange,
-  onUpload
+  onUpload,
+  onDelete
 }) => {
   const columns = useMemo<ColumnsType<MergedFile>>(() => [
     {
@@ -72,6 +74,24 @@ const UploadModal: React.FC<UploadModalProps> = React.memo(({
       key: 'path',
       ellipsis: true,
       render: (path: string) => <Text type="secondary" style={{ fontSize: 12 }}>{path}</Text>
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 80,
+      align: 'center',
+      render: (_: unknown, record: MergedFile) => (
+        <Popconfirm
+          title="确认删除"
+          description="将同时删除合并视频和对应的分段源文件（移至回收站）"
+          onConfirm={() => onDelete(record.name)}
+          okText="删除"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+        >
+          <Button type="text" danger icon={<DeleteOutlined />} size="small" />
+        </Popconfirm>
+      )
     }
   ], [])
 

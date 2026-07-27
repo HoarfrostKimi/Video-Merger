@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Layout, Button, Space, Tag, message, Typography, Empty, Progress, Card } from 'antd'
+import { Layout, Button, Space, Tag, message, Typography, Empty, Progress, Card, Modal } from 'antd'
 import { MergeCellsOutlined, BulbOutlined, BulbFilled, SettingOutlined, UploadOutlined } from '@ant-design/icons'
 import SettingsDrawer from './SettingsDrawer'
 import FolderToolbar from '../components/FolderToolbar'
@@ -534,6 +534,88 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     }
   }, [])
 
+  // 删除已合并 MP4 及对应分段文件
+  const handleDeleteMergedFile = useCallback(async (fileName: string) => {
+    if (!window.api) return
+    try {
+      const result = await window.api.deleteMergedFile(fileName)
+      message.success(`已删除，同时清理了 ${result.segmentCount} 个分段文件`)
+      const list = await window.api.getMergedFiles()
+      setMergedFiles(list)
+      setUploadSelectedKeys([])
+    } catch (err: any) {
+      message.error(err.message || '删除失败')
+    }
+  }, [])
+
+  // 删除单个分组的所有文件（分段+已合并MP4），由 MergeTable 行内 Popconfirm 触发
+  const handleDeleteOneGroup = useCallback(async (folder: FolderGroup) => {
+    if (!window.api) return
+    try {
+      const groups = [{
+        key: folder.key,
+        folderName: folder.folderName,
+        date: folder.date,
+        title: folder.title,
+        files: folder.files.map((f) => ({ path: f.path }))
+      }]
+      const result = await window.api.deleteSegments(groups)
+      const parts: string[] = []
+      if (result.segmentCount > 0) parts.push(`${result.segmentCount} 个分段`)
+      if (result.mp4Count > 0) parts.push(`${result.mp4Count} 个合并视频`)
+      message.success(`已删除「${folder.folderName}」：${parts.join('、') || '无文件'}`)
+      setFolders((prev) => prev.filter((f) => f.key !== folder.key))
+      setSelectedRowKeys((prev) => prev.filter((k) => k !== folder.key))
+      if (selectedFolder?.key === folder.key) setSelectedFolder(null)
+      loadMergedFiles()
+    } catch (err: any) {
+      message.error(err.message || '删除失败')
+    }
+  }, [selectedFolder, loadMergedFiles])
+
+  // 删除未合并的分段源文件（选中分组）
+  const handleDeleteSelected = useCallback(async () => {
+    if (!window.api) return
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要删除的分组')
+      return
+    }
+    const toDelete = folders.filter((f) => selectedRowKeys.includes(f.key))
+    const totalFiles = toDelete.reduce((s, g) => s + g.fileCount, 0)
+    // 使用 Modal.confirm 做二次确认
+    Modal.confirm({
+      title: '确认删除',
+      content: `将删除 ${toDelete.length} 个分组共 ${totalFiles} 个分段源文件（移至回收站）`,
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          const groups = toDelete.map((g) => ({
+            key: g.key,
+            folderName: g.folderName,
+            date: g.date,
+            title: g.title,
+            files: g.files.map((f) => ({ path: f.path }))
+          }))
+          const result = await window.api!.deleteSegments(groups)
+          const parts: string[] = []
+          if (result.segmentCount > 0) parts.push(`${result.segmentCount} 个分段`)
+          if (result.mp4Count > 0) parts.push(`${result.mp4Count} 个合并视频`)
+          message.success(`已删除 ${result.groupCount} 个分组：${parts.join('、') || '无文件'}`)
+          // 从列表中移除
+          setFolders((prev) => prev.filter((f) => !selectedRowKeys.includes(f.key)))
+          setSelectedRowKeys([])
+          setSelectedFolder(null)
+          // 刷新已合并文件列表（可能删了 MP4）
+          loadMergedFiles()
+        } catch (err: any) {
+          message.error(err.message || '删除失败')
+        }
+      }
+    })
+  }, [selectedRowKeys, folders])
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Header
@@ -606,6 +688,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               onRowClick={handleRowClick}
               onSelectionChange={setSelectedRowKeys}
               genMergeFileName={genMergeFileName}
+              onDeleteGroup={handleDeleteOneGroup}
             />
 
             <SubFileList selectedFolder={selectedFolder} />
@@ -629,6 +712,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               selectedRowKeys={selectedRowKeys}
               onMerge={handleMerge}
               onOpenDirectory={handleOpenDirectory}
+              onDeleteSelected={handleDeleteSelected}
             />
           </>
         )}
@@ -714,6 +798,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         onSelectChange={setUploadSelectedKeys}
         onUpload={handleUpload}
         onLoadFiles={loadMergedFiles}
+        onDelete={handleDeleteMergedFile}
       />
     </Layout>
   )
