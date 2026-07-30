@@ -438,6 +438,7 @@
         const text = el.textContent || ''
         if (text.length < 500 && (
           text.includes('上传封面') || text.includes('拖拽图片') || text.includes('更换封面') ||
+          text.includes('封面制作') || text.includes('封面编辑') ||
           text.includes('封面裁剪') || text.includes('裁剪封面') ||
           (text.includes('封面') && text.includes('裁剪'))
         )) {
@@ -513,12 +514,18 @@
       })
       if (uploading) return false
       // 出现已加载完成的预览图即视为封面已就绪
-      // 本地 blob 预览 / 服务器回显 http 图 / data: 图 都算：
-      // 用户在手动操作时也是「看到预览就点完成」，故允许本地预览作为成功信号
+      // 优先识别本地预览（blob:/data:）：这是我们注入截帧文件后生成的封面预览，
+      // 新版「封面制作」编辑器的「智能生成封面」AI 推荐缩略图为 http 图，
+      // 若把 http 也当作成功信号会误判，故本地预览优先、http 仅作兜底
       const imgs = root.querySelectorAll('img')
       for (const img of imgs) {
         const src = img.getAttribute('src') || ''
-        if (/^(blob:|data:|https?:)/.test(src) && img.complete && img.naturalWidth > 50 && img.naturalHeight > 50) return true
+        if (/^(blob:|data:)/.test(src) && img.complete && img.naturalWidth > 50 && img.naturalHeight > 50) return true
+      }
+      // 兜底：服务端回显的 http 图（部分旧版 UI 上传后无 blob 预览）
+      for (const img of imgs) {
+        const src = img.getAttribute('src') || ''
+        if (/^https?:/.test(src) && img.complete && img.naturalWidth > 50 && img.naturalHeight > 50) return true
       }
       return false
     }
@@ -539,8 +546,17 @@
     const dialog = findCoverDialog()
     const scope = dialog || document
 
-    // 等待「完成」按钮出现（取代固定 1.5s，避免弹窗刚开时按钮尚未渲染）
-    const doneBtn = await waitFor(() => findButtonInScope('完成', scope), 6000)
+    // 等待确认按钮出现（取代固定 1.5s，避免弹窗刚开时按钮尚未渲染）
+    // 新版「封面制作」编辑器的确认按钮文案可能不同，故按候选列表依次匹配
+    const confirmLabels = ['完成', '确定', '应用', '保存']
+    const findConfirm = (root) => {
+      for (const lbl of confirmLabels) {
+        const b = findButtonInScope(lbl, root)
+        if (b) return b
+      }
+      return null
+    }
+    const doneBtn = await waitFor(() => findConfirm(scope), 6000)
     if (doneBtn) {
       // 等待按钮变为可用（B站在上传/裁剪未完成时会 disable 按钮）
       const isBtnEnabled = (btn) => {
@@ -590,7 +606,7 @@
           await sleep(500)
           // 重试：动态查询当前弹窗（Vue 可能已替换节点）
           const currentDialog = findCoverDialog() || dialog
-          const retryBtn = findButtonInScope('完成', currentDialog)
+          const retryBtn = findConfirm(currentDialog)
           if (retryBtn) {
             const r = retryBtn.getBoundingClientRect()
             retryBtn.dispatchEvent(new MouseEvent('click', {
@@ -616,27 +632,34 @@
   async function stepSetCover(file, onLog) {
     onLog('设置封面...')
 
-    // ---- 1. 找到封面设置按钮 ----
-    let coverBtn = findButtonByText('封面设置')
+    // ---- 1. 找到封面上传入口按钮 ----
+    // 新版 B站投稿页把入口按钮文案从「封面设置」改成了「添加主封面」，
+    // 这里按顺序尝试多种候选文案，兼容不同版本的 UI
+    const coverEntryLabels = ['添加主封面', '封面设置', '更换封面', '选择封面', '上传封面']
+    let coverBtn = null
+    for (const label of coverEntryLabels) {
+      coverBtn = findButtonByText(label)
+      if (coverBtn) { onLog(`找到封面入口按钮: 「${label}」`); break }
+    }
     if (!coverBtn) {
       onLog('尝试通过页面结构定位封面区域...')
       for (const el of document.querySelectorAll('*')) {
         const directText = Array.from(el.childNodes)
           .filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
-        if (directText !== '封面' && directText !== '* 封面') continue
+        if (directText !== '封面' && directText !== '* 封面' && directText !== '添加主封面') continue
         const parent = el.closest('.el-form-item') || el.parentElement
         if (!parent) break
         coverBtn = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]')
         if (coverBtn) break
         for (const item of parent.querySelectorAll('*')) {
-          if (item.textContent.includes('封面设置')) { coverBtn = item; break }
+          if (item.textContent.includes('封面') || item.textContent.includes('添加主封面')) { coverBtn = item; break }
         }
         break
       }
     }
 
     if (!coverBtn) {
-      onLog('提示: 未找到封面设置按钮，跳过'); await sleep(500); return
+      onLog('提示: 未找到封面入口按钮，跳过'); await sleep(500); return
     }
 
     // ---- 2. 点击打开弹窗 ----
@@ -645,7 +668,7 @@
       bubbles: true, cancelable: true, view: window,
       clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
     }))
-    onLog('已点击封面设置，等待弹窗...')
+    onLog('已点击封面入口，等待弹窗...')
 
     // ---- 3. 等待弹窗出现（使用内容特征检测，兼容 B站 UI 改版）----
     // B站需先获取视频元数据再显示裁剪界面，网络慢时可能需要较长时间
@@ -699,32 +722,29 @@
     const coverFile = new File([frameBlob], 'cover.jpg', { type: 'image/jpeg' })
     onLog(`封面文件: ${coverFile.name}, ${(coverFile.size / 1024).toFixed(0)}KB`)
 
-    // ---- 5. 找到封面上传区域并注入文件（等待出现，最多 8s，避免弹窗未渲染就跳过）----
-    const uploadArea = await waitFor(() => Array.from(document.querySelectorAll('*')).find(el => {
-      const text = el.textContent
-      return text.includes('上传封面') && text.includes('拖拽图片') && el.children.length <= 5
-    }), 8000)
-
-    if (!uploadArea) {
-      onLog('提示: 未找到上传区域，请手动上传')
-      await confirmCoverDialog(onLog)
-      return
-    }
-    onLog('找到上传封面区域')
-
-    // 等待封面 file input 出现（最多 5s）—— 注入前确保元素已挂载
-    const coverInput = await waitFor(() => {
+    // ---- 5. 找到封面 file input 并注入截帧文件 ----
+    // 新版「封面制作」编辑器中，「上传封面」是一个按钮（点击触发隐藏的 input[type=file]），
+    // 不再保证存在「拖拽图片」文案且与按钮同元素，故这里直接定位隐藏的 image file input。
+    // 若按 accept 过滤找不到，则在封面弹窗作用域内兜底匹配任意 file input
+    // （弹窗范围内只会存在封面图 input，主视频上传 input 在弹窗之外，不会误匹配）。
+    const findCoverInput = () => {
       const allInputs = document.querySelectorAll('input[type="file"]')
-      return Array.from(allInputs).find(inp => (inp.getAttribute('accept') || '').toLowerCase().includes('image'))
-    }, 5000)
+      const byAccept = Array.from(allInputs).find(inp =>
+        (inp.getAttribute('accept') || '').toLowerCase().includes('image'))
+      if (byAccept) return byAccept
+      const root = findCoverDialog() || document
+      const inDialog = Array.from(root.querySelectorAll('input[type="file"]'))
+      return inDialog.length ? inDialog[0] : null
+    }
 
+    const coverInput = await waitFor(findCoverInput, 8000)
     if (!coverInput) {
-      onLog('提示: 未找到封面 input (accept 含 image)，请手动上传')
+      onLog('提示: 未找到封面 input，请手动上传')
       await confirmCoverDialog(onLog)
       return
     }
 
-    onLog(`找到封面 input: accept="${coverInput.getAttribute('accept')}"`)
+    onLog(`找到封面 input: accept="${coverInput.getAttribute('accept') || '(无 accept)'}"`)
     setFileToInput(coverInput, coverFile)
     onLog('已设置封面文件，等待上传完成...')
 
