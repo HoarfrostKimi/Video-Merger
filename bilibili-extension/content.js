@@ -633,9 +633,9 @@
     onLog('设置封面...')
 
     // ---- 1. 找到封面上传入口按钮 ----
-    // 新版 B站投稿页把入口按钮文案从「封面设置」改成了「添加主封面」，
-    // 这里按顺序尝试多种候选文案，兼容不同版本的 UI
-    const coverEntryLabels = ['添加主封面', '封面设置', '更换封面', '选择封面', '上传封面']
+    // 新版 B站投稿页入口按钮文案多次变化：封面设置 → 添加主封面 → 添加封面，
+    // 这里按顺序尝试多种候选文案，兼容不同版本的 UI（最新文案置前）
+    const coverEntryLabels = ['添加封面', '添加主封面', '封面设置', '更换封面', '选择封面', '上传封面']
     let coverBtn = null
     for (const label of coverEntryLabels) {
       coverBtn = findButtonByText(label)
@@ -646,13 +646,13 @@
       for (const el of document.querySelectorAll('*')) {
         const directText = Array.from(el.childNodes)
           .filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
-        if (directText !== '封面' && directText !== '* 封面' && directText !== '添加主封面') continue
+        if (directText !== '封面' && directText !== '* 封面' && directText !== '添加主封面' && directText !== '添加封面') continue
         const parent = el.closest('.el-form-item') || el.parentElement
         if (!parent) break
         coverBtn = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]')
         if (coverBtn) break
         for (const item of parent.querySelectorAll('*')) {
-          if (item.textContent.includes('封面') || item.textContent.includes('添加主封面')) { coverBtn = item; break }
+          if (item.textContent.includes('封面') || item.textContent.includes('添加主封面') || item.textContent.includes('添加封面')) { coverBtn = item; break }
         }
         break
       }
