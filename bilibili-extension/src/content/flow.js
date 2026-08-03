@@ -1,5 +1,5 @@
 // flow.js - 主流程编排：uploadAndSubmit / batchUpload
-import { sleep, waitForElement, waitForElementByText } from './core/wait.js'
+import { sleep, waitFor, waitForElement, waitForElementByText } from './core/wait.js'
 import { findButtonByText, toClickable } from './core/find.js'
 import { parseTitle } from './core/title.js'
 import { runStep, recordError, setCurrentStep } from './core/errorReport.js'
@@ -62,10 +62,12 @@ export async function batchUpload(files, onLog, targetText) {
       } else {
         // 后续视频：通过"添加分P"按钮上传
         onLog('查找添加分P按钮...')
-        await sleep(1000)
 
-        // 找"添加分P"按钮
-        const addPartBtn = findButtonByText(BUTTON_LABELS.addPart[0]) || findButtonByText(BUTTON_LABELS.addPart[1])
+        // 找"添加分P"按钮（等它出现，替代固定 sleep，慢网时不丢时序）
+        const addPartBtn = await waitFor(
+          () => findButtonByText(BUTTON_LABELS.addPart[0]) || findButtonByText(BUTTON_LABELS.addPart[1]),
+          10000, 500
+        )
         if (!addPartBtn) {
           throw new Error('未找到添加分P按钮')
         }
@@ -73,11 +75,13 @@ export async function batchUpload(files, onLog, targetText) {
         // 点击"添加分P"按钮
         addPartBtn.click()
         onLog('已点击添加分P，等待文件输入框...')
-        await sleep(TIMEOUTS.afterPartClick)
 
-        // 直接找 bcc-upload-wrapper 里的视频 input
-        const wrapperInputs = document.querySelectorAll(SELECTORS.bccUploadWrapper)
+        // 等待并定位视频文件输入框（替代固定 sleep(2000)，等状态而非干等）
         let fileInput = null
+        try {
+          await waitForElement(SELECTORS.bccUploadWrapper, 15000)
+        } catch (err) { /* wrapper 未出现，尝试 fallback */ }
+        const wrapperInputs = document.querySelectorAll(SELECTORS.bccUploadWrapper)
         for (const inp of wrapperInputs) {
           const accept = (inp.getAttribute('accept') || '').toLowerCase()
           if (VIDEO_EXTENSIONS.some((ext) => accept.includes(ext)) || accept.includes('video')) {

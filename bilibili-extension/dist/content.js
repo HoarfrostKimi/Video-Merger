@@ -947,16 +947,22 @@
           await uploadAndSubmit(file, onLog, targetText);
         } else {
           onLog("查找添加分P按钮...");
-          await sleep(1e3);
-          const addPartBtn = findButtonByText(BUTTON_LABELS.addPart[0]) || findButtonByText(BUTTON_LABELS.addPart[1]);
+          const addPartBtn = await waitFor(
+            () => findButtonByText(BUTTON_LABELS.addPart[0]) || findButtonByText(BUTTON_LABELS.addPart[1]),
+            1e4,
+            500
+          );
           if (!addPartBtn) {
             throw new Error("未找到添加分P按钮");
           }
           addPartBtn.click();
           onLog("已点击添加分P，等待文件输入框...");
-          await sleep(TIMEOUTS.afterPartClick);
-          const wrapperInputs = document.querySelectorAll(SELECTORS.bccUploadWrapper);
           let fileInput = null;
+          try {
+            await waitForElement(SELECTORS.bccUploadWrapper, 15e3);
+          } catch (err) {
+          }
+          const wrapperInputs = document.querySelectorAll(SELECTORS.bccUploadWrapper);
           for (const inp of wrapperInputs) {
             const accept = (inp.getAttribute("accept") || "").toLowerCase();
             if (VIDEO_EXTENSIONS.some((ext) => accept.includes(ext)) || accept.includes("video")) {
