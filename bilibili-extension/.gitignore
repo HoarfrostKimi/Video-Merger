@@ -1,0 +1,8 @@
+# B站投稿助手 - 插件目录忽略规则
+node_modules/
+.quality/
+*.log
+
+# 工具/临时文件
+reasonix.toml
+.reasonix/

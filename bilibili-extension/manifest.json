@@ -11,7 +11,7 @@
   "content_scripts": [
     {
       "matches": ["https://member.bilibili.com/platform/upload/video/frame*"],
-      "js": ["content.js"],
+      "js": ["dist/content.js"],
       "css": ["content.css"]
     }
   ]
