@@ -1153,8 +1153,6 @@ ipcMain.handle('segments:delete', async (_event, groups: Array<{ key: string; fo
     for (const group of groups) {
       const liveDate = group.date || ''
       const liveTitle = group.title || ''
-      const dateLower = liveDate.toLowerCase()
-      const titleLower = liveTitle.toLowerCase()
 
       // 1. 删除分段源文件
       for (const file of group.files) {
@@ -1168,18 +1166,17 @@ ipcMain.handle('segments:delete', async (_event, groups: Array<{ key: string; fo
         }
       }
 
-      // 2. 查找并删除已合并的 MP4（新旧两种命名格式）
+      // 2. 查找并删除已合并的 MP4（输出格式：{直播日期}_{标题}_{合并日期}_{时间}_合并版.mp4）
+      //    规则：日期钉死开头 + 标题片段（前后带下划线界定），且只删 _合并版.mp4 结尾 → 不误删跨日期同标题、不子串误删、不受标题特殊字符影响
+      const dateLower = (liveDate || '').toLowerCase()
+      const titleLower = (liveTitle || '').toLowerCase()
+      const titleFrag = `_${titleLower}_`
       for (const mp4Name of outputMp4s) {
         const mp4Lower = mp4Name.toLowerCase()
+        if (!mp4Lower.endsWith('_合并版.mp4')) continue
         let matched = false
-        // 旧格式：2026-07-12_95老阿姨_..._合并版.mp4 → 日期开头 + 包含标题
-        if (dateLower && titleLower && mp4Lower.startsWith(dateLower) && mp4Lower.includes(titleLower)) {
-          matched = true
-        }
-        // 新格式：95老阿姨_2026-07-12.mp4 → 标题开头 + 包含日期
-        if (dateLower && titleLower && mp4Lower.startsWith(titleLower) && mp4Lower.includes(dateLower)) {
-          matched = true
-        }
+        if (dateLower && titleLower && mp4Lower.startsWith(dateLower) && mp4Lower.includes(titleFrag)) matched = true
+        if (dateLower && titleLower && mp4Lower.startsWith(titleLower) && mp4Lower.includes(`_${dateLower}_`)) matched = true
         if (matched) {
           try {
             await shell.trashItem(join(outputFolder, mp4Name))
