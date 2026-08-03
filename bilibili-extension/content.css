@@ -120,6 +120,24 @@
   cursor: not-allowed;
 }
 
+.bili-helper-copy-btn {
+  display: block;
+  width: 100%;
+  padding: 6px 0;
+  margin-bottom: 8px;
+  background: #f4f4f4;
+  color: #333;
+  border: 1px solid #e3e5e7;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.bili-helper-copy-btn:hover {
+  background: #e8e8e8;
+}
+
 #bili-helper-log {
   margin-top: 12px;
   border-top: 1px solid #eee;

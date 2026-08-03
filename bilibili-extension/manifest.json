@@ -3,7 +3,7 @@
   "name": "B站投稿助手",
   "version": "1.0.0",
   "description": "自动上传本地MP4视频到B站并提交稿件，配合视频合并工具使用",
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage", "activeTab", "clipboardWrite"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "action": {
     "default_popup": "popup.html"

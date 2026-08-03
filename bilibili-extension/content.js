@@ -31,14 +31,27 @@
     }
   }
 
-  /** 从文件名解析标题 */
+  /** 从文件名提取核心标题（去掉日期与「合并版」后缀），用于页面定位等内部匹配 */
+  function cleanTitle(fileName) {
+    const name = fileName.replace(/\.mp4$/i, '')
+    const title = name
+      .replace(/^(?:\d{4}[-_]\d{2}[-_]\d{2})\s*[_\s]*/, '')  // 去前置日期（分隔符可选）
+      .replace(/(?:\s*_*\s*合并版)+$/g, '')                   // 去合并版后缀（先剥，避免残留日期被后置规则漏掉）
+      .replace(/(?:\s*_?\s*\d{4}[-_]\d{2}[-_]\d{2})$/, '')     // 去后置日期
+      .trim()
+    return title || name
+  }
+
+  /** 从文件名解析投稿标题：保留文件名中的日期（如有）并前置，不加时间 */
   function parseTitle(fileName) {
     const name = fileName.replace(/\.mp4$/i, '')
-    const match = name.match(/^(?:\d{4}[-_]\d{2}[-_]\d{2})\s*[_\s]\s*(.+?)(?:\s*_?\s*\d{4}[-_]\d{2}[-_]\d{2}|$)/)
-    if (match && match[1]) {
-      return match[1].replace(/[_合并版]+$/g, '').trim() || name
+    const dateMatch = name.match(/(\d{4})[-_](\d{2})[-_](\d{2})/)
+    const title = cleanTitle(fileName)
+    // title === name 表示未提取出独立标题（如文件名就是「日期_合并版」），此时不拼重复日期
+    if (dateMatch && title !== name) {
+      return `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]} ${title}`
     }
-    return name
+    return title
   }
 
   /** 等待元素出现（支持多个 selector） */
@@ -172,6 +185,124 @@
     return false
   }
 
+  // ============ 错误自证（错误包收集） ============
+
+  /** 日志缓冲：onLog 的所有输出同时累积于此，供错误包取尾部 */
+  const logBuffer = []
+  const MAX_LOG_BUFFER = 300
+
+  /** 当前执行步骤（由 runStep 维护），出错时用于定位步骤名与源码 */
+  let currentStep = null
+
+  /** 任务运行标志：批量上传进行中为 true（visibilitychange 提示据此避免误报） */
+  let isUploading = false
+
+  /**
+   * 记录当前执行步骤：保存步骤名与函数源码（函数 toString() 无需任何权限）。
+   * 后续步骤出错时，错误包能带上「当时在跑哪个函数、源码长什么样」。
+   */
+  async function runStep(name, fn, ...args) {
+    currentStep = { name, source: fn.toString() }
+    return fn(...args)
+  }
+
+  /** 收集关键 DOM 快照（出错瞬间页面长什么样），供 AI 定位选择器 */
+  function collectDomSnapshot() {
+    const snap = {}
+    const grab = (key, selectors) => {
+      try {
+        const el = document.querySelector(selectors)
+        snap[key] = el ? el.outerHTML.slice(0, 600) : null
+      } catch (e) {
+        snap[key] = null
+      }
+    }
+    grab('标题框', 'input[placeholder*="标题"], textarea[placeholder*="标题"]')
+    grab('可见范围radio', '.check-radio-v2-container')
+    grab('创作声明select', '.el-select')
+    grab('上传file input', 'input[type="file"]')
+    const coverDialog = findCoverDialog()
+    snap['封面弹窗'] = coverDialog ? coverDialog.outerHTML.slice(0, 800) : null
+    const submitBtn = findButtonByText('立即投稿')
+    snap['立即投稿按钮'] = submitBtn ? submitBtn.outerHTML.slice(0, 300) : null
+    return snap
+  }
+
+  /**
+   * 记录一次错误并自动保存到 localStorage（保留最近 5 份）。
+   * @param {Error|string} err
+   * @param {object} [extra] 附加上下文（如当前文件/批次）
+   */
+  function recordError(err, extra) {
+    let dom = {}
+    try { dom = collectDomSnapshot() } catch (e) { dom = { _error: String(e) } }
+    const report = {
+      time: new Date().toLocaleString(),
+      url: location.href,
+      step: currentStep ? currentStep.name : 'unknown',
+      error: err && err.message ? err.message : String(err),
+      stack: err && err.stack ? err.stack.split('\n').slice(0, 5).join('\n') : '',
+      logTail: logBuffer.slice(-40),
+      dom,
+      source: currentStep ? currentStep.source.slice(0, 4000) : '',
+      extra: extra || {},
+    }
+    try {
+      const key = 'bili_helper_error_reports'
+      const list = JSON.parse(localStorage.getItem(key) || '[]')
+      if (!Array.isArray(list)) throw new Error('bad data')
+      list.push(report)
+      while (list.length > 5) list.shift()
+      localStorage.setItem(key, JSON.stringify(list))
+    } catch (e) {
+      console.log('[B站投稿助手] 保存错误报告失败:', e)
+    }
+    return report
+  }
+
+  /** 把错误报告格式化成 Markdown（可直接粘贴给 AI） */
+  function formatReportMarkdown(report) {
+    const lines = []
+    lines.push('# B站投稿助手 · 错误报告')
+    lines.push('')
+    lines.push('## 基本信息')
+    lines.push(`- 时间: ${report.time}`)
+    lines.push(`- 页面: ${report.url}`)
+    lines.push(`- 出错步骤: ${report.step}`)
+    lines.push(`- 错误: ${report.error}`)
+    if (report.stack) {
+      lines.push('')
+      lines.push('## 调用栈（前5行）')
+      lines.push('```')
+      lines.push(report.stack)
+      lines.push('```')
+    }
+    if (Object.keys(report.extra || {}).length) {
+      lines.push('')
+      lines.push('## 附加上下文')
+      for (const [k, v] of Object.entries(report.extra)) {
+        lines.push(`- ${k}: ${v}`)
+      }
+    }
+    lines.push('')
+    lines.push('## 日志（尾部40条）')
+    lines.push('```')
+    lines.push((report.logTail || []).join('\n') || '(无日志)')
+    lines.push('```')
+    lines.push('')
+    lines.push('## 出错瞬间 DOM 快照（选择器定位用）')
+    for (const [key, html] of Object.entries(report.dom || {})) {
+      lines.push(`### ${key}`)
+      lines.push(html ? '```html\n' + html + '\n```' : '`(未找到)`')
+    }
+    lines.push('')
+    lines.push('## 出错步骤源码')
+    lines.push('```js')
+    lines.push(report.source || '(无)')
+    lines.push('```')
+    return lines.join('\n')
+  }
+
   // ============ 核心自动化步骤 ============
 
   /**
@@ -213,7 +344,63 @@
   }
 
   /**
-   * Step 3: 设置创作声明为「内容无需标注」
+   * Step 3: 填写标题
+   * B站上传后默认以文件名作为标题，但该行为可能随版本变化；
+   * 显式填入解析出的标题，避免投稿出现空标题/错误标题。
+   */
+  async function stepSetTitle(title, onLog) {
+    onLog(`填写标题: ${title}`)
+    let input
+    // 优先匹配更具体的主标题占位文案，避免命中分P标题框（分P编辑页同时存在多个标题框）
+    const preciseSelectors = [
+      'input[placeholder*="输入标题"]',
+      'textarea[placeholder*="输入标题"]',
+      'input[placeholder*="填写标题"]',
+      'textarea[placeholder*="填写标题"]',
+      'input[placeholder*="作品标题"]',
+      'textarea[placeholder*="作品标题"]',
+    ]
+    const fallbackSelectors = [
+      'input[placeholder*="标题"]',
+      'textarea[placeholder*="标题"]',
+      '[class*="title"] input',
+      '[class*="title"] textarea',
+    ]
+    try {
+      input = await waitForElement(preciseSelectors, 5000)
+    } catch (err) { /* 精确匹配超时，回退到模糊选择器 */ }
+    if (!input) {
+      try {
+        input = await waitForElement(fallbackSelectors, 10000)
+      } catch (err) {
+        onLog('提示: 未找到标题输入框，跳过标题填写')
+        return
+      }
+    }
+    const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
+    const applyTitle = () => {
+      if (setter) setter.call(input, title)
+      else input.value = title
+      input.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
+    }
+    applyTitle()
+    await sleep(300)
+    // 校验：编辑器可能截断或异步清空，未生效则重填一次
+    if ((input.value || '').trim() !== title.trim()) {
+      applyTitle()
+      await sleep(300)
+    }
+    if ((input.value || '').trim() !== title.trim()) {
+      onLog(`警告: 标题填写后未生效（当前值: ${input.value || '(空)'}），请检查标题框是否被锁定`)
+    } else {
+      onLog('标题已填写')
+    }
+  }
+
+  /**
+   * Step 4: 设置创作声明为「内容无需标注」
    */
   async function stepSetDeclaration(onLog) {
     onLog('设置创作声明...')
@@ -252,7 +439,7 @@
   }
 
   /**
-   * Step 4: 设置可见范围
+   * Step 5: 设置可见范围
    * 可见范围是自定义 check-radio-v2 组件，非原生 radio 也非 el-select
    * @param {string} targetText - 要选中的可见范围文本，如'公开可见'、'仅自己可见'
    */
@@ -627,7 +814,7 @@
   }
 
   /**
-   * Step 5: 设置封面（所有视频统一走「视频截帧」封面）
+   * Step 6: 设置封面（所有视频统一走「视频截帧」封面）
    */
   async function stepSetCover(file, onLog) {
     onLog('设置封面...')
@@ -765,18 +952,72 @@
   }
 
   /**
-   * Step 6: 点击「立即投稿」
+   * Step 7: 点击「立即投稿」（加固版）
+   * 原实现只点一次、不检查按钮是否可用：disabled 按钮点击无效却日志报成功（假成功）。
+   * 现在：等按钮出现且可用 → 点击 → 验证生效（按钮禁用/出现提交反馈），未生效则重试一次。
    */
   async function stepSubmit(onLog) {
     onLog('准备提交稿件...')
-    await sleep(1000)
 
-    const submitBtn = findButtonByText('立即投稿')
-    if (submitBtn) {
-      submitBtn.click()
-      onLog('已点击「立即投稿」！')
+    const MAX_WAIT = 30000
+    const isDisabled = (btn) => {
+      if (btn.disabled) return true
+      if (btn.getAttribute('aria-disabled') === 'true') return true
+      const cls = btn.className || ''
+      return typeof cls === 'string' && /disabled/.test(cls)
+    }
+
+    // 1. 等「立即投稿」按钮出现且可用（不 disabled）
+    const submitBtn = await waitFor(() => {
+      const btn = findButtonByText('立即投稿')
+      if (!btn || isDisabled(btn)) return null
+      return btn
+    }, MAX_WAIT, 1000)
+
+    if (!submitBtn) {
+      const exists = findButtonByText('立即投稿')
+      if (exists) {
+        onLog(`警告: 「立即投稿」按钮 ${MAX_WAIT / 1000}s 内始终禁用，可能上传/封面未完成，请手动检查`)
+      } else {
+        onLog('警告: 未找到「立即投稿」按钮，请手动提交')
+      }
+      return
+    }
+
+    // 2. 点击
+    submitBtn.click()
+    onLog('已点击「立即投稿」')
+
+    // 3. 验证生效：按钮进入禁用状态，或连续 3 次（约 1.5s）都找不到按钮（避免渲染间隙误判）才算提交成功；未生效则重试一次
+    let disappearCount = 0
+    const confirmed = await waitFor(() => {
+      const btn = findButtonByText('立即投稿')
+      if (btn) {
+        disappearCount = 0
+        return isDisabled(btn) ? true : null
+      }
+      disappearCount++
+      return disappearCount >= 3 ? true : null
+    }, 5000, 500)
+
+    if (confirmed) {
+      onLog('投稿已提交')
+      return
+    }
+
+    // 若已出现确认弹窗（部分场景点「立即投稿」后有二次确认），交给用户手动确认，避免程序化重复点击
+    const msgBox = document.querySelector('.el-message-box')
+    if (msgBox) {
+      onLog('检测到确认弹窗，请手动确认投稿')
+      return
+    }
+    onLog('警告: 未确认投稿生效，重试点击...')
+    const retryBtn = findButtonByText('立即投稿')
+    if (retryBtn && !isDisabled(retryBtn)) {
+      retryBtn.click()
+      onLog('已重试点击「立即投稿」')
     } else {
-      onLog('警告: 未找到「立即投稿」按钮，请手动提交')
+      onLog('警告: 按钮状态异常，请手动确认投稿状态')
     }
   }
 
@@ -792,22 +1033,25 @@
     onLog('')
 
     // Step 1: 上传文件
-    await stepUploadFile(file, onLog)
+    await runStep('stepUploadFile', stepUploadFile, file, onLog)
 
     // Step 2: 等待表单加载
-    await stepWaitForForm(onLog)
+    await runStep('stepWaitForForm', stepWaitForForm, onLog)
 
-    // Step 3: 设置创作声明
-    await stepSetDeclaration(onLog)
+    // Step 3: 填写标题
+    await runStep('stepSetTitle', stepSetTitle, title, onLog)
 
-    // Step 4: 设置可见范围
-    await stepSetVisibility(onLog, targetText)
+    // Step 4: 设置创作声明
+    await runStep('stepSetDeclaration', stepSetDeclaration, onLog)
 
-    // Step 5: 设置封面（截取视频帧作为自定义封面）
-    await stepSetCover(file, onLog)
+    // Step 5: 设置可见范围
+    await runStep('stepSetVisibility', stepSetVisibility, onLog, targetText)
 
-    // Step 6: 提交
-    await stepSubmit(onLog)
+    // Step 6: 设置封面（截取视频帧作为自定义封面）
+    await runStep('stepSetCover', stepSetCover, file, onLog)
+
+    // Step 7: 提交
+    await runStep('stepSubmit', stepSubmit, onLog)
 
     onLog('')
     onLog(`《${title}》处理完成`)
@@ -818,8 +1062,11 @@
    * 批量上传：第一个视频正常上传，后续点击队列卡片进入编辑页面再上传
    */
   async function batchUpload(files, onLog, targetText) {
+    onLog('提示: 投稿期间请保持本页面可见，最小化窗口会导致浏览器节流、提交可能卡住')
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
+      // 重置当前步骤标记：批次内非 runStep 错误（如找不到按钮）也能定位到具体第几个
+      currentStep = { name: `batchUpload-第${i + 1}个`, source: '' }
       onLog(`===== 第 ${i + 1}/${files.length} 个视频 =====`)
 
       try {
@@ -887,7 +1134,8 @@
           onLog('文件已设置，等待视频卡片出现...')
 
           // 等待视频卡片出现在队列中（MutationObserver 替代 setInterval 轮询）
-          const titleKeyword = parseTitle(file.name)
+          // 用去扩展名的完整文件名作为关键词（含日期）：区分度最高，同系列不同日期不会点错旧卡片
+          const titleKeyword = file.name.replace(/\.mp4$/i, '')
           await waitForElementByText(titleKeyword, 60000)
           onLog('视频卡片已出现在队列中')
           await sleep(2000)
@@ -931,16 +1179,19 @@
           onLog('已进入编辑页面')
 
           // 填表
-          await stepWaitForForm(onLog)
-          await stepSetDeclaration(onLog)
-          await stepSetVisibility(onLog, targetText)
-          await stepSetCover(file, onLog)
-          await stepSubmit(onLog)
+          await runStep('stepWaitForForm', stepWaitForForm, onLog)
+          // 注意：分P分支不填写标题——B站分P标题默认使用文件名（行为稳定），
+          // 且此处页面上同时存在主标题框与分P标题框，显式填写容易覆盖主稿件标题
+          await runStep('stepSetDeclaration', stepSetDeclaration, onLog)
+          await runStep('stepSetVisibility', stepSetVisibility, onLog, targetText)
+          await runStep('stepSetCover', stepSetCover, file, onLog)
+          await runStep('stepSubmit', stepSubmit, onLog)
 
           onLog('')
           onLog(`第 ${i + 1} 个视频处理完成`)
         }
       } catch (err) {
+        recordError(err, { 批次: `第 ${i + 1}/${files.length} 个`, 文件: file.name })
         onLog(`第 ${i + 1} 个视频失败: ${err.message}`)
       }
     }
@@ -978,6 +1229,7 @@
           <button class="bili-helper-upload-btn" id="bili-helper-start">开始自动上传</button>
         </div>
         <div id="bili-helper-log" style="display:none">
+          <button class="bili-helper-copy-btn" id="bili-helper-copy-report">📋 复制错误包（粘贴给 AI）</button>
           <pre id="bili-helper-log-content"></pre>
         </div>
       </div>
@@ -1004,6 +1256,77 @@
       document.getElementById('bili-helper-min').textContent = minimized ? '+' : '—'
     })
 
+    // 复制错误包：把最近一份错误报告转成 Markdown 复制到剪贴板
+    document.getElementById('bili-helper-copy-report').addEventListener('click', async () => {
+      const btn = document.getElementById('bili-helper-copy-report')
+      let reports = []
+      try {
+        reports = JSON.parse(localStorage.getItem('bili_helper_error_reports') || '[]')
+      } catch (e) { reports = [] }
+      if (!Array.isArray(reports) || !reports.length) {
+        btn.textContent = '暂无错误报告'
+        setTimeout(() => { btn.textContent = '📋 复制错误包（粘贴给 AI）' }, 1500)
+        return
+      }
+      const md = formatReportMarkdown(reports[reports.length - 1])
+      try {
+        await navigator.clipboard.writeText(md)
+        btn.textContent = '✅ 已复制，粘贴给 AI 即可'
+      } catch (e) {
+        // 兜底：textarea + execCommand（检查返回值，失败时如实提示）
+        try {
+          const ta = document.createElement('textarea')
+          ta.value = md
+          ta.style.position = 'fixed'
+          ta.style.opacity = '0'
+          document.body.appendChild(ta)
+          ta.select()
+          const ok = document.execCommand('copy')
+          document.body.removeChild(ta)
+          btn.textContent = ok ? '✅ 已复制（兜底方式）' : '⚠️ 复制失败，请手动复制日志'
+        } catch (e2) {
+          btn.textContent = '⚠️ 复制失败'
+        }
+      }
+      setTimeout(() => { btn.textContent = '📋 复制错误包（粘贴给 AI）' }, 2500)
+    })
+
+    // 开始上传逻辑（声明在 change 回调之前，避免 TDZ 与可读性问题）
+    const startBtn = document.getElementById('bili-helper-start')
+    const startClickHandler = async () => {
+      const files = Array.from(document.getElementById('bili-helper-files').files)
+      if (files.length === 0) return
+      logBuffer.length = 0
+      startBtn.disabled = true
+      startBtn.textContent = '上传中...'
+
+      const logDiv = document.getElementById('bili-helper-log')
+      const logContent = document.getElementById('bili-helper-log-content')
+      logDiv.style.display = 'block'
+      logContent.textContent = ''
+
+      const onLog = (msg) => {
+        logBuffer.push(msg)
+        if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift()
+        logContent.textContent += msg + '\n'
+        logContent.scrollTop = logContent.scrollHeight
+      }
+
+      isUploading = true
+      try {
+        const visText = document.getElementById('bili-helper-visibility').value
+        await batchUpload(files, onLog, visText)
+        startBtn.textContent = '全部完成'
+      } catch (err) {
+        recordError(err)
+        onLog(`错误: ${err.message}`)
+        startBtn.textContent = '出错，请重试'
+      } finally {
+        isUploading = false
+        startBtn.disabled = false
+      }
+    }
+
     // 文件选择
     document.getElementById('bili-helper-files').addEventListener('change', (e) => {
       const files = Array.from(e.target.files)
@@ -1022,38 +1345,38 @@
         preview.appendChild(div)
       })
 
-      // 开始上传按钮
-      document.getElementById('bili-helper-start').addEventListener('click', async () => {
-        const startBtn = document.getElementById('bili-helper-start')
-        startBtn.disabled = true
-        startBtn.textContent = '上传中...'
-
-        const logDiv = document.getElementById('bili-helper-log')
-        const logContent = document.getElementById('bili-helper-log-content')
-        logDiv.style.display = 'block'
-        logContent.textContent = ''
-
-        const onLog = (msg) => {
-          logContent.textContent += msg + '\n'
-          logDiv.scrollTop = logDiv.scrollHeight
-        }
-
-        try {
-          const visText = document.getElementById('bili-helper-visibility').value
-          await batchUpload(files, onLog, visText)
-          startBtn.textContent = '全部完成'
-        } catch (err) {
-          onLog(`错误: ${err.message}`)
-          startBtn.textContent = '出错，请重试'
-        }
-        startBtn.disabled = false
-      })
+      // 绑定开始按钮：先移除旧监听器再绑定，防止重复选择文件时叠加多个监听器导致多次批量上传
+      startBtn.removeEventListener('click', startClickHandler)
+      startBtn.addEventListener('click', startClickHandler)
     })
   }
 
   // 启动
   createPanel()
   console.log('[B站投稿助手] 面板已注入')
+
+  // 页面可见性检测：后台/最小化标签页会被浏览器节流，导致投稿流程卡住或点击无效
+  let hiddenSince = null
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      hiddenSince = Date.now()
+    } else if (hiddenSince) {
+      const seconds = Math.round((Date.now() - hiddenSince) / 1000)
+      // 只有任务运行中且隐藏超过 2s 才提示，避免挂机/快速切标签误报
+      if (isUploading && seconds >= 2) {
+        const msg = `⚠️ 页面曾被隐藏 ${seconds}s，期间浏览器可能节流了投稿流程，请确认投稿状态`
+        logBuffer.push(msg)
+        if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift()
+        const content = document.getElementById('bili-helper-log-content')
+        if (content) {
+          content.textContent += msg + '\n'
+          content.scrollTop = content.scrollHeight
+        }
+        console.log('[B站投稿助手]', msg)
+      }
+      hiddenSince = null
+    }
+  })
 
   // 检测 URL 参数，自动开始上传（来自视频合并 app 的联动）
   const urlParams = new URLSearchParams(window.location.search)
@@ -1073,20 +1396,24 @@
 
       // 延迟执行，等页面完全加载
       setTimeout(async () => {
+        logBuffer.length = 0
         const logDiv = document.getElementById('bili-helper-log')
         const logContent = document.getElementById('bili-helper-log-content')
         if (logDiv) logDiv.style.display = 'block'
 
         const onLog = (msg) => {
           if (logContent) {
+            logBuffer.push(msg)
+            if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift()
             logContent.textContent += msg + '\n'
-            if (logDiv) logDiv.scrollTop = logDiv.scrollHeight
+            logContent.scrollTop = logContent.scrollHeight
           }
           console.log('[B站投稿助手]', msg)
         }
 
         onLog('收到视频合并app的自动上传指令...')
 
+        isUploading = true
         try {
           // 从本地服务器下载文件
           const files = []
@@ -1118,7 +1445,10 @@
             console.log('[B站投稿助手] 发送完成信号失败:', e)
           }
         } catch (err) {
+          recordError(err)
           onLog(`错误: ${err.message}`)
+        } finally {
+          isUploading = false
         }
       }, 3000)
     }
