@@ -254,11 +254,13 @@
     return false;
   }
   function findCoverDialog() {
+    const isSelfPanel = (el) => el && (el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel"));
     const known = document.querySelector(SELECTORS.coverDialogKnown.join(", "));
-    if (known) return known;
+    if (known && !isSelfPanel(known)) return known;
     const candidates = [];
     const imgInputs = document.querySelectorAll(SELECTORS.imageFileInput);
     for (const inp of imgInputs) {
+      if (isSelfPanel(inp)) continue;
       if (inp.offsetParent !== null || inp.closest('[style*="display: none"]') === null) {
         candidates.push(inp);
       }
@@ -266,6 +268,7 @@
     if (candidates.length === 0) {
       const allEls = document.querySelectorAll("div, section, aside");
       for (const el of allEls) {
+        if (isSelfPanel(el)) continue;
         const text = el.textContent || "";
         if (text.length < 500 && (TEXT_KEYWORDS.coverFeatures.some((kw) => text.includes(kw)) || text.includes("封面") && text.includes("裁剪"))) {
           candidates.push(el);
@@ -275,6 +278,7 @@
     if (candidates.length === 0) {
       const canvases = document.querySelectorAll("canvas");
       for (const cvs of canvases) {
+        if (isSelfPanel(cvs)) continue;
         const style = window.getComputedStyle(cvs);
         if (style.display !== "none" && cvs.width > 100 && cvs.height > 100) {
           candidates.push(cvs);
@@ -284,6 +288,7 @@
     for (const el of candidates) {
       let node = el;
       while (node && node !== document.body) {
+        if (node.id === "bili-helper-panel") break;
         const style = window.getComputedStyle(node);
         const cls = (node.className || "").toString().toLowerCase();
         const zIndex = parseInt(style.zIndex) || 0;
@@ -296,6 +301,7 @@
     }
     const allContainers = document.querySelectorAll("div, section, aside, article");
     for (const ov of allContainers) {
+      if (isSelfPanel(ov)) continue;
       const style = window.getComputedStyle(ov);
       if (style.position !== "fixed" && style.position !== "absolute") continue;
       if (style.display === "none" || style.visibility === "hidden") continue;
@@ -658,6 +664,9 @@
   }
   async function confirmCoverDialog(onLog) {
     const dialog = findCoverDialog();
+    if (!dialog) {
+      onLog("警告: 未检测到封面弹窗，将按全页面范围查找「完成」按钮");
+    }
     const scope = dialog || document;
     const findConfirm = (root) => {
       for (const lbl of BUTTON_LABELS.coverConfirm) {
@@ -730,9 +739,10 @@
       }
     } else {
       onLog("提示: 未找到完成按钮");
+      const dialogNow = findCoverDialog();
       let fallback = null;
       for (const lbl of BUTTON_LABELS.coverConfirm) {
-        fallback = findButtonByText(lbl);
+        fallback = (dialogNow ? findButtonInScope(lbl, dialogNow) : null) || findButtonByText(lbl);
         if (fallback) break;
       }
       if (fallback) {

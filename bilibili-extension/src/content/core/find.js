@@ -100,9 +100,13 @@ export function clickDropdownOption(text) {
  * @returns {Element|null}
  */
 export function findCoverDialog() {
+  // 排除助手面板自身：面板是 fixed 定位、高 z-index、且内含 file input，
+  // 不排除会被兜底检测误判为“封面弹窗”，导致弹窗关闭验证/按钮查找全部失效
+  const isSelfPanel = (el) => el && (el.id === 'bili-helper-panel' || (el.closest && el.closest('#bili-helper-panel')))
+
   // 1. 已知选择器（兼容旧版）
   const known = document.querySelector(SELECTORS.coverDialogKnown.join(', '))
-  if (known) return known
+  if (known && !isSelfPanel(known)) return known
 
   // 2. 内容特征检测：找到封面相关的 file input 或上传提示文本，向上追溯弹窗容器
   const candidates = []
@@ -110,6 +114,7 @@ export function findCoverDialog() {
   // 2a. 通过 image file input 定位
   const imgInputs = document.querySelectorAll(SELECTORS.imageFileInput)
   for (const inp of imgInputs) {
+    if (isSelfPanel(inp)) continue
     if (inp.offsetParent !== null || inp.closest('[style*="display: none"]') === null) {
       candidates.push(inp)
     }
@@ -119,6 +124,7 @@ export function findCoverDialog() {
   if (candidates.length === 0) {
     const allEls = document.querySelectorAll('div, section, aside')
     for (const el of allEls) {
+      if (isSelfPanel(el)) continue
       const text = el.textContent || ''
       if (text.length < 500 && (
         TEXT_KEYWORDS.coverFeatures.some((kw) => text.includes(kw)) ||
@@ -133,6 +139,7 @@ export function findCoverDialog() {
   if (candidates.length === 0) {
     const canvases = document.querySelectorAll('canvas')
     for (const cvs of canvases) {
+      if (isSelfPanel(cvs)) continue
       const style = window.getComputedStyle(cvs)
       if (style.display !== 'none' && cvs.width > 100 && cvs.height > 100) {
         candidates.push(cvs)
@@ -144,6 +151,7 @@ export function findCoverDialog() {
   for (const el of candidates) {
     let node = el
     while (node && node !== document.body) {
+      if (node.id === 'bili-helper-panel') break // 绝不把助手面板当弹窗返回
       const style = window.getComputedStyle(node)
       const cls = (node.className || '').toString().toLowerCase()
       const zIndex = parseInt(style.zIndex) || 0
@@ -165,6 +173,7 @@ export function findCoverDialog() {
   // 3. 兜底：查找任何 fixed/absolute 遮罩层（z-index > 50）内含封面相关内容
   const allContainers = document.querySelectorAll('div, section, aside, article')
   for (const ov of allContainers) {
+    if (isSelfPanel(ov)) continue
     const style = window.getComputedStyle(ov)
     if (style.position !== 'fixed' && style.position !== 'absolute') continue
     if (style.display === 'none' || style.visibility === 'hidden') continue

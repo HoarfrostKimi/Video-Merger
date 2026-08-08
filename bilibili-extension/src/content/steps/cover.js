@@ -127,6 +127,9 @@ export function waitForCoverUploaded(timeout = TIMEOUTS.coverUploaded) {
 export async function confirmCoverDialog(onLog) {
   // 在当前 DOM 中找到封面弹窗（限缩小查找范围）
   const dialog = findCoverDialog()
+  if (!dialog) {
+    onLog('警告: 未检测到封面弹窗，将按全页面范围查找「完成」按钮')
+  }
   const scope = dialog || document
 
   // 等待确认按钮出现（取代固定 1.5s，避免弹窗刚开时按钮尚未渲染）
@@ -207,10 +210,11 @@ export async function confirmCoverDialog(onLog) {
     }
   } else {
     onLog('提示: 未找到完成按钮')
-    // 备用方案：全页面查找（遍历全部候选文案，与主路径一致）
+    // 备用方案：优先在（重新定位的）封面弹窗内查找，再全页面查找（避免点到页面其他无关「完成」）
+    const dialogNow = findCoverDialog()
     let fallback = null
     for (const lbl of BUTTON_LABELS.coverConfirm) {
-      fallback = findButtonByText(lbl)
+      fallback = (dialogNow ? findButtonInScope(lbl, dialogNow) : null) || findButtonByText(lbl)
       if (fallback) break
     }
     if (fallback) {
