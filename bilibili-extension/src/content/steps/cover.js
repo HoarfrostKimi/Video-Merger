@@ -138,6 +138,18 @@ export async function confirmCoverDialog(onLog) {
     }
     return null
   }
+
+  // 验证弹窗是否真的关闭了（移除 DOM / display:none / visibility:hidden / opacity:0 均视为关闭）
+  // 提升到函数顶层：主路径与 fallback 分支共用
+  const isDialogGone = (el) => {
+    if (!el || !document.body.contains(el)) return true
+    const style = el.style
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return true
+    const computed = window.getComputedStyle(el)
+    if (computed.display === 'none' || computed.visibility === 'hidden') return true
+    return false
+  }
+
   const doneBtn = await waitFor(() => findConfirm(scope), TIMEOUTS.coverConfirmBtn)
   if (doneBtn) {
     // 等待按钮变为可用（B站在上传/裁剪未完成时会 disable 按钮）
@@ -163,16 +175,6 @@ export async function confirmCoverDialog(onLog) {
     }))
     onLog('封面设置完成')
 
-    // 验证弹窗是否真的关闭了（最多等 5 秒）
-    // B站可能通过移除 DOM、display:none、visibility:hidden 等方式关闭弹窗
-    const isDialogGone = (el) => {
-      if (!el || !document.body.contains(el)) return true
-      const style = el.style
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return true
-      const computed = window.getComputedStyle(el)
-      if (computed.display === 'none' || computed.visibility === 'hidden') return true
-      return false
-    }
     if (dialog) {
       await new Promise((resolve) => {
         let tries = 0
@@ -205,8 +207,12 @@ export async function confirmCoverDialog(onLog) {
     }
   } else {
     onLog('提示: 未找到完成按钮')
-    // 备用方案：全页面查找
-    const fallback = findButtonByText(BUTTON_LABELS.coverConfirm[0])
+    // 备用方案：全页面查找（遍历全部候选文案，与主路径一致）
+    let fallback = null
+    for (const lbl of BUTTON_LABELS.coverConfirm) {
+      fallback = findButtonByText(lbl)
+      if (fallback) break
+    }
     if (fallback) {
       // 与主路径一致：dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
       const fr = fallback.getBoundingClientRect()
@@ -359,16 +365,25 @@ export async function stepSetCover(file, onLog) {
     onLog(`警告: ${TIMEOUTS.coverUploaded / 1000}s 内未确认封面上传完成，再宽限 ${TIMEOUTS.coverGrace / 1000}s...`)
     await sleep(TIMEOUTS.coverGrace)
     const currentDialog = findCoverDialog()
-    // 作用域收窄：仅在弹窗内接受 http 图（避免误匹配页面其他缩略图）；
-    // 弹窗不存在时全页只认 blob:/data:（我们注入的截帧预览图）
     const root = currentDialog || document
-    const imgSel = currentDialog
-      ? 'img[src^="blob:"], img[src^="data:"], img[src^="http"]'
-      : 'img[src^="blob:"], img[src^="data:"]'
-    const previewImg = root.querySelector(imgSel)
-    // 尺寸校验：避免 AI 推荐缩略图/未加载完成的图误判为上传成功
-    const hasPreview = previewImg && previewImg.complete && previewImg.naturalWidth > 50 && previewImg.naturalHeight > 50
-    if (!hasPreview) {
+    // 与 waitForCoverUploaded 同构：先 blob/data 后 http 两遍扫描（仅弹窗内接受 http），
+    // 避免 AI 推荐缩略图（http）排在前而误判上传成功
+    const pickPreview = () => {
+      const imgs = root.querySelectorAll('img')
+      const loaded = (img) => img.complete && img.naturalWidth > 50 && img.naturalHeight > 50
+      for (const img of imgs) {
+        const src = img.getAttribute('src') || ''
+        if (/^(blob:|data:)/.test(src) && loaded(img)) return img
+      }
+      if (currentDialog) {
+        for (const img of imgs) {
+          const src = img.getAttribute('src') || ''
+          if (/^https?:/.test(src) && loaded(img)) return img
+        }
+      }
+      return null
+    }
+    if (!pickPreview()) {
       throw new Error('封面上传未确认完成（已中止该视频，请手动检查封面）')
     }
     onLog('检测到封面预览')

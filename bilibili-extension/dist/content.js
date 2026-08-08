@@ -666,6 +666,14 @@
       }
       return null;
     };
+    const isDialogGone = (el) => {
+      if (!el || !document.body.contains(el)) return true;
+      const style = el.style;
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return true;
+      const computed = window.getComputedStyle(el);
+      if (computed.display === "none" || computed.visibility === "hidden") return true;
+      return false;
+    };
     const doneBtn = await waitFor(() => findConfirm(scope), TIMEOUTS.coverConfirmBtn);
     if (doneBtn) {
       const isBtnEnabled = (btn) => {
@@ -689,25 +697,17 @@
         clientY: rect.top + rect.height / 2
       }));
       onLog("封面设置完成");
-      const isDialogGone2 = (el) => {
-        if (!el || !document.body.contains(el)) return true;
-        const style = el.style;
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return true;
-        const computed = window.getComputedStyle(el);
-        if (computed.display === "none" || computed.visibility === "hidden") return true;
-        return false;
-      };
       if (dialog) {
         await new Promise((resolve) => {
           let tries = 0;
           const check = () => {
             tries++;
-            if (isDialogGone2(dialog) || tries > TIMEOUTS.dialogGoneMaxTries) resolve();
+            if (isDialogGone(dialog) || tries > TIMEOUTS.dialogGoneMaxTries) resolve();
             else setTimeout(check, TIMEOUTS.dialogGoneInterval);
           };
           check();
         });
-        if (!isDialogGone2(dialog)) {
+        if (!isDialogGone(dialog)) {
           onLog("警告: 封面弹窗似乎未关闭，将重试...");
           await sleep(500);
           const currentDialog = findCoverDialog() || dialog;
@@ -723,14 +723,18 @@
             }));
             await sleep(1e3);
           }
-          if (!isDialogGone2(currentDialog)) {
+          if (!isDialogGone(currentDialog)) {
             throw new Error("封面弹窗重试后仍未关闭（已中止该视频，请手动设置封面）");
           }
         }
       }
     } else {
       onLog("提示: 未找到完成按钮");
-      const fallback = findButtonByText(BUTTON_LABELS.coverConfirm[0]);
+      let fallback = null;
+      for (const lbl of BUTTON_LABELS.coverConfirm) {
+        fallback = findButtonByText(lbl);
+        if (fallback) break;
+      }
       if (fallback) {
         const fr = fallback.getBoundingClientRect();
         fallback.dispatchEvent(new MouseEvent("click", {
@@ -868,10 +872,22 @@
       await sleep(TIMEOUTS.coverGrace);
       const currentDialog = findCoverDialog();
       const root = currentDialog || document;
-      const imgSel = currentDialog ? 'img[src^="blob:"], img[src^="data:"], img[src^="http"]' : 'img[src^="blob:"], img[src^="data:"]';
-      const previewImg = root.querySelector(imgSel);
-      const hasPreview = previewImg && previewImg.complete && previewImg.naturalWidth > 50 && previewImg.naturalHeight > 50;
-      if (!hasPreview) {
+      const pickPreview = () => {
+        const imgs = root.querySelectorAll("img");
+        const loaded = (img) => img.complete && img.naturalWidth > 50 && img.naturalHeight > 50;
+        for (const img of imgs) {
+          const src = img.getAttribute("src") || "";
+          if (/^(blob:|data:)/.test(src) && loaded(img)) return img;
+        }
+        if (currentDialog) {
+          for (const img of imgs) {
+            const src = img.getAttribute("src") || "";
+            if (/^https?:/.test(src) && loaded(img)) return img;
+          }
+        }
+        return null;
+      };
+      if (!pickPreview()) {
         throw new Error("封面上传未确认完成（已中止该视频，请手动检查封面）");
       }
       onLog("检测到封面预览");
