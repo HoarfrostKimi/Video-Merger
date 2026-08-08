@@ -34,6 +34,7 @@ export function createPanel() {
       </div>
       <div id="bili-helper-log" style="display:none">
         <button class="bili-helper-copy-btn" id="bili-helper-copy-report">📋 复制错误包（粘贴给 AI）</button>
+        <span class="bili-helper-report-ts" id="bili-helper-report-ts"></span>
         <pre id="bili-helper-log-content"></pre>
       </div>
     </div>
@@ -94,6 +95,25 @@ export function createPanel() {
     }
     setTimeout(() => { btn.textContent = '📋 复制错误包（粘贴给 AI）' }, 2500)
   })
+
+  // 显示最近一份错误报告的时间戳（避免把历史残留误当本次失败）
+  const updateReportTs = () => {
+    const tsEl = document.getElementById('bili-helper-report-ts')
+    if (!tsEl) return
+    let reports = []
+    try {
+      reports = JSON.parse(localStorage.getItem(STORAGE_KEYS.errorReports) || '[]')
+    } catch (e) { reports = [] }
+    const last = Array.isArray(reports) && reports.length ? reports[reports.length - 1] : null
+    if (last && last.time) {
+      // toLocaleString 形如 "2026/8/8 19:08:44"，去掉秒更清爽
+      tsEl.textContent = `最近错误: ${last.time.replace(/:\d{2}$/, '')}`
+      tsEl.title = last.time
+    } else {
+      tsEl.textContent = '暂无错误记录'
+    }
+  }
+  updateReportTs()
 
   // 开始上传逻辑（声明在 change 回调之前，避免 TDZ 与可读性问题）
   const startBtn = document.getElementById('bili-helper-start')

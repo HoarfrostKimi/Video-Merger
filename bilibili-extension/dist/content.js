@@ -1122,6 +1122,7 @@
       </div>
       <div id="bili-helper-log" style="display:none">
         <button class="bili-helper-copy-btn" id="bili-helper-copy-report">📋 复制错误包（粘贴给 AI）</button>
+        <span class="bili-helper-report-ts" id="bili-helper-report-ts"></span>
         <pre id="bili-helper-log-content"></pre>
       </div>
     </div>
@@ -1180,6 +1181,24 @@
         btn.textContent = "📋 复制错误包（粘贴给 AI）";
       }, 2500);
     });
+    const updateReportTs = () => {
+      const tsEl = document.getElementById("bili-helper-report-ts");
+      if (!tsEl) return;
+      let reports = [];
+      try {
+        reports = JSON.parse(localStorage.getItem(STORAGE_KEYS.errorReports) || "[]");
+      } catch (e) {
+        reports = [];
+      }
+      const last = Array.isArray(reports) && reports.length ? reports[reports.length - 1] : null;
+      if (last && last.time) {
+        tsEl.textContent = `最近错误: ${last.time.replace(/:\d{2}$/, "")}`;
+        tsEl.title = last.time;
+      } else {
+        tsEl.textContent = "暂无错误记录";
+      }
+    };
+    updateReportTs();
     const startBtn = document.getElementById("bili-helper-start");
     const startClickHandler = async () => {
       const files = Array.from(document.getElementById("bili-helper-files").files);
