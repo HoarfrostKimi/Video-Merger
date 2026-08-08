@@ -197,13 +197,34 @@ export async function confirmCoverDialog(onLog) {
           }))
           await sleep(1000)
         }
+        // 重试后仍未关闭：封面确认失败，中止该视频（错误包由上层 catch 生成）
+        if (!isDialogGone(currentDialog)) {
+          throw new Error('封面弹窗重试后仍未关闭（已中止该视频，请手动设置封面）')
+        }
       }
     }
   } else {
     onLog('提示: 未找到完成按钮')
     // 备用方案：全页面查找
     const fallback = findButtonByText(BUTTON_LABELS.coverConfirm[0])
-    if (fallback) { fallback.click(); onLog('（备用方案）封面设置完成') }
+    if (fallback) {
+      // 与主路径一致：dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
+      const fr = fallback.getBoundingClientRect()
+      fallback.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: fr.left + fr.width / 2, clientY: fr.top + fr.height / 2
+      }))
+      onLog('（备用方案）封面设置完成')
+      // 验证弹窗是否关闭，未关则中止（避免备用点击无效却静默继续）
+      await sleep(500)
+      const cur = findCoverDialog()
+      if (cur && !isDialogGone(cur)) {
+        throw new Error('封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）')
+      }
+    } else {
+      // 完成按钮完全找不到：封面确认失败，中止该视频（错误包由上层 catch 生成）
+      throw new Error('未找到封面「完成」按钮（已中止该视频，请手动设置封面）')
+    }
   }
   await sleep(500)
 }
@@ -240,7 +261,8 @@ export async function stepSetCover(file, onLog) {
   }
 
   if (!coverBtn) {
-    onLog('提示: 未找到封面入口按钮，跳过'); await sleep(500); return
+    // 封面入口找不到：中止该视频（错误包由上层 catch 生成）
+    throw new Error('未找到封面入口按钮（已中止该视频，请手动设置封面）')
   }
 
   // ---- 2. 点击打开弹窗 ----
@@ -285,7 +307,8 @@ export async function stepSetCover(file, onLog) {
   }
 
   if (!dialog) {
-    onLog('警告: 封面弹窗三次尝试后仍未出现，跳过封面'); await sleep(500); return
+    // 封面弹窗三次尝试后仍未出现：中止该视频
+    throw new Error('封面弹窗三次尝试后仍未出现（已中止该视频，请手动设置封面）')
   }
   onLog('封面弹窗已打开')
 
@@ -295,9 +318,8 @@ export async function stepSetCover(file, onLog) {
     frameBlob = await captureFrameFromFile(file)
     onLog('视频截帧成功')
   } catch (err) {
-    onLog(`提示: 截帧失败(${err.message})，请手动选择封面`)
-    await confirmCoverDialog(onLog)
-    return
+    // 截帧失败：中止该视频（错误包由上层 catch 生成）
+    throw new Error(`封面截帧失败: ${err.message}（已中止该视频，请手动设置封面）`)
   }
 
   const coverFile = new File([frameBlob], 'cover.jpg', { type: 'image/jpeg' })
@@ -320,9 +342,8 @@ export async function stepSetCover(file, onLog) {
 
   const coverInput = await waitFor(findCoverInput, 8000)
   if (!coverInput) {
-    onLog('提示: 未找到封面 input，请手动上传')
-    await confirmCoverDialog(onLog)
-    return
+    // 封面 input 找不到：中止该视频
+    throw new Error('未找到封面 input（已中止该视频，请手动设置封面）')
   }
 
   onLog(`找到封面 input: accept="${coverInput.getAttribute('accept') || '(无 accept)'}"`)
@@ -334,12 +355,23 @@ export async function stepSetCover(file, onLog) {
   if (uploaded) {
     onLog('封面上传完成，预览图已显示')
   } else {
-    // 超时兜底：再宽限一次，仍未完成则提示但继续（避免整批卡死）
+    // 超时兜底：宽限一次，仍未完成则视为封面失败，中止该视频
     onLog(`警告: ${TIMEOUTS.coverUploaded / 1000}s 内未确认封面上传完成，再宽限 ${TIMEOUTS.coverGrace / 1000}s...`)
     await sleep(TIMEOUTS.coverGrace)
-    const currentDialog = findCoverDialog() || document
-    const hasPreview = currentDialog.querySelector('img[src^="blob:"], img[src^="http"], img[src^="data:"]')
-    onLog(hasPreview ? '检测到封面预览' : '警告: 仍未检测到封面预览，可能上传较慢')
+    const currentDialog = findCoverDialog()
+    // 作用域收窄：仅在弹窗内接受 http 图（避免误匹配页面其他缩略图）；
+    // 弹窗不存在时全页只认 blob:/data:（我们注入的截帧预览图）
+    const root = currentDialog || document
+    const imgSel = currentDialog
+      ? 'img[src^="blob:"], img[src^="data:"], img[src^="http"]'
+      : 'img[src^="blob:"], img[src^="data:"]'
+    const previewImg = root.querySelector(imgSel)
+    // 尺寸校验：避免 AI 推荐缩略图/未加载完成的图误判为上传成功
+    const hasPreview = previewImg && previewImg.complete && previewImg.naturalWidth > 50 && previewImg.naturalHeight > 50
+    if (!hasPreview) {
+      throw new Error('封面上传未确认完成（已中止该视频，请手动检查封面）')
+    }
+    onLog('检测到封面预览')
   }
 
   await confirmCoverDialog(onLog)
