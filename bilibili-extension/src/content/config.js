@@ -84,7 +84,7 @@ export const TIMEOUTS = {
   coverGrace: 5000, // 封面上传超时宽限
   coverConfirmBtn: 6000, // 封面确认按钮出现
   coverConfirmEnabled: 10000, // 封面确认按钮可用
-  frameCapture: 15000, // 视频截帧超时
+  frameCapture: 30000, // 视频截帧超时（大文件/页面短暂不可见需要更长时间）
   submitWait: 30000, // 立即投稿按钮可用等待
   submitVerify: 5000, // 投稿生效验证
   dialogGoneMaxTries: 20, // 封面弹窗关闭轮询次数

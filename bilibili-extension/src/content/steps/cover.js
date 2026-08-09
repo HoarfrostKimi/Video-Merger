@@ -89,13 +89,15 @@ export async function captureFrameFromFile(file) {
 
     video.addEventListener('abort', () => fail('视频加载被中止'))
 
-    // 截帧超时：按到达的阶段给出具体诊断
+    // 截帧超时：按到达的阶段给出具体诊断（含页面不可见分支）
     timer = setTimeout(() => {
-      const phase = !gotMetadata
-        ? '未能获取视频元数据，编码不受浏览器支持或文件损坏'
-        : seekStarted
-          ? '视频已加载但 seek/解码卡住，可能文件不完整或编码异常'
-          : '已获取元数据但视频数据加载卡住，大文件或 moov 元数据在文件末尾'
+      const phase = document.hidden
+        ? '页面不可见（电脑黑屏或窗口最小化），浏览器挂起视频解码'
+        : !gotMetadata
+          ? '未能获取视频元数据，编码不受浏览器支持或文件损坏'
+          : seekStarted
+            ? '视频已加载但 seek/解码卡住，可能文件不完整或编码异常'
+            : '已获取元数据但视频数据加载卡住，大文件或 moov 元数据在文件末尾'
       fail(`截帧超时: ${phase}`)
     }, TIMEOUTS.frameCapture)
   })
@@ -357,13 +359,26 @@ export async function stepSetCover(file, onLog) {
   }
   onLog('封面弹窗已打开')
 
+  // ---- 3.5 页面不可见（黑屏/最小化）：跳过截帧，改用系统推荐封面 ----
+  // 浏览器会挂起后台页面的视频解码，黑屏时截帧必然超时，直接走推荐封面更稳
+  if (document.hidden) {
+    onLog('⚠️ 页面不可见（电脑黑屏或窗口最小化），浏览器挂起视频解码，跳过截帧，改用系统封面')
+    await useRecommendedCover(onLog)
+    return
+  }
+
   // ---- 4. 截帧 ----
   let frameBlob
   try {
     frameBlob = await captureFrameFromFile(file)
     onLog('视频截帧成功')
   } catch (err) {
-    // 截帧失败：中止该视频（错误包由上层 catch 生成）
+    // 截帧失败：若页面此时不可见（中途黑屏），降级用系统封面；可见则中止
+    if (document.hidden) {
+      onLog(`⚠️ 截帧失败且页面不可见（${err.message}），改用系统封面`)
+      await useRecommendedCover(onLog)
+      return
+    }
     throw new Error(`封面截帧失败: ${err.message}（已中止该视频，请手动设置封面）`)
   }
 
@@ -429,4 +444,65 @@ export async function stepSetCover(file, onLog) {
   }
 
   await confirmCoverDialog(onLog)
+}
+
+/**
+ * 页面不可见时使用系统推荐封面（不依赖视频解码）。
+ * 优先点弹窗内「智能生成/推荐封面」入口；找不到则关闭弹窗跳过封面（B站自动生成封面）。
+ * @returns {Promise<boolean>} 是否成功设置了推荐封面
+ */
+async function useRecommendedCover(onLog) {
+  const scope = findCoverDialog() || document
+  const recommendLabels = ['智能生成', '智能封面', '推荐封面', 'AI生成', 'AI 生成', '系统推荐', '一键生成', '智能推荐']
+  // 弹窗刚开时推荐入口可能尚未渲染，先等它出现（5s），避免直接误判"找不到"
+  const findEntry = () => {
+    for (const lbl of recommendLabels) {
+      const b = findButtonInScope(lbl, scope)
+      if (b) return b
+    }
+    return null
+  }
+  const btn = await waitFor(findEntry, 5000, 500)
+  if (!btn) {
+    onLog('警告: 未找到智能推荐封面入口，跳过封面设置（由B站自动生成封面）')
+    tryCloseCoverDialog(onLog)
+    return false
+  }
+  onLog(`找到推荐封面入口: 「${recommendLabels.find((l) => findButtonInScope(l, scope))}」`)
+  const r = btn.getBoundingClientRect()
+  btn.dispatchEvent(new MouseEvent('click', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: r.left + r.width / 2, clientY: r.top + r.height / 2
+  }))
+  onLog('已点击推荐封面，等待生成...')
+  await sleep(3000)
+  try {
+    await confirmCoverDialog(onLog)
+    return true
+  } catch (err) {
+    onLog(`警告: 推荐封面确认失败(${err.message})，跳过封面设置`)
+    tryCloseCoverDialog(onLog)
+    return false
+  }
+}
+
+/** 尝试关闭封面弹窗（跳过封面设置时用），失败则忽略，不阻塞流程 */
+function tryCloseCoverDialog(onLog) {
+  try {
+    const close = document.querySelector(
+      '.cover-editor-head-close, .bcc-dialog__header [class*="close"], [class*="dialog"] [class*="close"], [class*="close-btn"]'
+    )
+    if (close) {
+      const r = close.getBoundingClientRect()
+      close.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2
+      }))
+      onLog('已关闭封面弹窗（跳过封面）')
+    } else {
+      onLog('提示: 未找到封面弹窗关闭按钮，弹窗将保留')
+    }
+  } catch (e) {
+    onLog('提示: 关闭封面弹窗失败')
+  }
 }

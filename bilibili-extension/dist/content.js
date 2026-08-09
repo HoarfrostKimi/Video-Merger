@@ -155,8 +155,8 @@
     // 封面确认按钮出现
     coverConfirmEnabled: 1e4,
     // 封面确认按钮可用
-    frameCapture: 15e3,
-    // 视频截帧超时
+    frameCapture: 3e4,
+    // 视频截帧超时（大文件/页面短暂不可见需要更长时间）
     submitWait: 3e4,
     // 立即投稿按钮可用等待
     submitVerify: 5e3,
@@ -638,7 +638,7 @@
       });
       video.addEventListener("abort", () => fail("视频加载被中止"));
       timer = setTimeout(() => {
-        const phase = !gotMetadata ? "未能获取视频元数据，编码不受浏览器支持或文件损坏" : seekStarted ? "视频已加载但 seek/解码卡住，可能文件不完整或编码异常" : "已获取元数据但视频数据加载卡住，大文件或 moov 元数据在文件末尾";
+        const phase = document.hidden ? "页面不可见（电脑黑屏或窗口最小化），浏览器挂起视频解码" : !gotMetadata ? "未能获取视频元数据，编码不受浏览器支持或文件损坏" : seekStarted ? "视频已加载但 seek/解码卡住，可能文件不完整或编码异常" : "已获取元数据但视频数据加载卡住，大文件或 moov 元数据在文件末尾";
         fail(`截帧超时: ${phase}`);
       }, TIMEOUTS.frameCapture);
     });
@@ -878,11 +878,21 @@
       throw new Error("封面弹窗三次尝试后仍未出现（已中止该视频，请手动设置封面）");
     }
     onLog("封面弹窗已打开");
+    if (document.hidden) {
+      onLog("⚠️ 页面不可见（电脑黑屏或窗口最小化），浏览器挂起视频解码，跳过截帧，改用系统封面");
+      await useRecommendedCover(onLog);
+      return;
+    }
     let frameBlob;
     try {
       frameBlob = await captureFrameFromFile(file);
       onLog("视频截帧成功");
     } catch (err) {
+      if (document.hidden) {
+        onLog(`⚠️ 截帧失败且页面不可见（${err.message}），改用系统封面`);
+        await useRecommendedCover(onLog);
+        return;
+      }
       throw new Error(`封面截帧失败: ${err.message}（已中止该视频，请手动设置封面）`);
     }
     const coverFile = new File([frameBlob], "cover.jpg", { type: "image/jpeg" });
@@ -931,6 +941,64 @@
       onLog("检测到封面预览");
     }
     await confirmCoverDialog(onLog);
+  }
+  async function useRecommendedCover(onLog) {
+    const scope = findCoverDialog() || document;
+    const recommendLabels = ["智能生成", "智能封面", "推荐封面", "AI生成", "AI 生成", "系统推荐", "一键生成", "智能推荐"];
+    const findEntry = () => {
+      for (const lbl of recommendLabels) {
+        const b = findButtonInScope(lbl, scope);
+        if (b) return b;
+      }
+      return null;
+    };
+    const btn = await waitFor(findEntry, 5e3, 500);
+    if (!btn) {
+      onLog("警告: 未找到智能推荐封面入口，跳过封面设置（由B站自动生成封面）");
+      tryCloseCoverDialog(onLog);
+      return false;
+    }
+    onLog(`找到推荐封面入口: 「${recommendLabels.find((l) => findButtonInScope(l, scope))}」`);
+    const r = btn.getBoundingClientRect();
+    btn.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: r.left + r.width / 2,
+      clientY: r.top + r.height / 2
+    }));
+    onLog("已点击推荐封面，等待生成...");
+    await sleep(3e3);
+    try {
+      await confirmCoverDialog(onLog);
+      return true;
+    } catch (err) {
+      onLog(`警告: 推荐封面确认失败(${err.message})，跳过封面设置`);
+      tryCloseCoverDialog(onLog);
+      return false;
+    }
+  }
+  function tryCloseCoverDialog(onLog) {
+    try {
+      const close = document.querySelector(
+        '.cover-editor-head-close, .bcc-dialog__header [class*="close"], [class*="dialog"] [class*="close"], [class*="close-btn"]'
+      );
+      if (close) {
+        const r = close.getBoundingClientRect();
+        close.dispatchEvent(new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: r.left + r.width / 2,
+          clientY: r.top + r.height / 2
+        }));
+        onLog("已关闭封面弹窗（跳过封面）");
+      } else {
+        onLog("提示: 未找到封面弹窗关闭按钮，弹窗将保留");
+      }
+    } catch (e) {
+      onLog("提示: 关闭封面弹窗失败");
+    }
   }
 
   // src/content/steps/submit.js
