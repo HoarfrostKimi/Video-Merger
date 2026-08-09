@@ -5,6 +5,8 @@ import { BUTTON_LABELS, TIMEOUTS } from '../config.js'
 
 /**
  * 从视频文件中截取一帧作为封面图片
+ * 错误诊断细化：区分「编码不支持/文件损坏」「视频数据加载卡住」「seek/解码卡住」，
+ * 不再笼统报「截帧超时」，方便定位是文件问题还是页面问题
  */
 export async function captureFrameFromFile(file) {
   return new Promise((resolve, reject) => {
@@ -13,10 +15,32 @@ export async function captureFrameFromFile(file) {
     video.muted = true
     video.preload = 'auto'
 
+    let gotMetadata = false
+    let seekStarted = false
+    let done = false
+    let timer = null
+    const fail = (msg) => {
+      if (done) return
+      done = true
+      if (timer) clearTimeout(timer)
+      URL.revokeObjectURL(video.src)
+      reject(new Error(msg))
+    }
+    const succeed = (blob) => {
+      if (done) return
+      done = true
+      if (timer) clearTimeout(timer)
+      URL.revokeObjectURL(video.src)
+      resolve(blob)
+    }
+
+    video.addEventListener('loadedmetadata', () => { gotMetadata = true })
+
     video.addEventListener('loadeddata', () => {
       // 跳到第2秒（或视频长度的一半，取较小值）
       const seekTime = Math.min(2, video.duration / 2)
       video.currentTime = seekTime
+      seekStarted = true
     })
 
     video.addEventListener('seeked', () => {
@@ -47,21 +71,32 @@ export async function captureFrameFromFile(file) {
       const ctx = canvas.getContext('2d')
       ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
       canvas.toBlob((blob) => {
-        URL.revokeObjectURL(video.src)
-        if (blob) resolve(blob)
-        else reject(new Error('截帧失败'))
+        if (blob) succeed(blob)
+        else fail('截帧失败')
       }, 'image/jpeg', 0.9)
     })
 
     video.addEventListener('error', () => {
-      URL.revokeObjectURL(video.src)
-      reject(new Error('视频加载失败'))
+      const code = video.error ? video.error.code : '?'
+      const reasons = {
+        1: '解码失败（编码可能不受浏览器支持，如 H.265/HEVC）',
+        2: '网络错误',
+        3: '解码被中止',
+        4: '格式不支持',
+      }
+      fail(`视频加载失败: ${reasons[code] || ('错误码 ' + code)}`)
     })
 
-    // 截帧超时
-    setTimeout(() => {
-      URL.revokeObjectURL(video.src)
-      reject(new Error('截帧超时'))
+    video.addEventListener('abort', () => fail('视频加载被中止'))
+
+    // 截帧超时：按到达的阶段给出具体诊断
+    timer = setTimeout(() => {
+      const phase = !gotMetadata
+        ? '未能获取视频元数据，编码不受浏览器支持或文件损坏'
+        : seekStarted
+          ? '视频已加载但 seek/解码卡住，可能文件不完整或编码异常'
+          : '已获取元数据但视频数据加载卡住，大文件或 moov 元数据在文件末尾'
+      fail(`截帧超时: ${phase}`)
     }, TIMEOUTS.frameCapture)
   })
 }
