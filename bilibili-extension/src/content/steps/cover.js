@@ -255,17 +255,33 @@ export async function confirmCoverDialog(onLog) {
       if (fallback) break
     }
     if (fallback) {
-      // 与主路径一致：dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
+      // 记录点击目标，便于失败时定位（B站文案变化时能看出点到了什么）
+      const fbText = (fallback.textContent || '').trim().slice(0, 20)
+      const fbCls = typeof fallback.className === 'string' ? fallback.className.split(' ')[0] : ''
+      onLog(`（备用方案）点击「${fbText}」(${fallback.tagName}${fbCls ? '.' + fbCls : ''})`)
       const fr = fallback.getBoundingClientRect()
       fallback.dispatchEvent(new MouseEvent('click', {
         bubbles: true, cancelable: true, view: window,
         clientX: fr.left + fr.width / 2, clientY: fr.top + fr.height / 2
       }))
-      onLog('（备用方案）封面设置完成')
-      // 验证弹窗是否关闭，未关则中止（避免备用点击无效却静默继续）
-      await sleep(500)
+      onLog('（备用方案）封面设置完成，等待弹窗关闭...')
+      // 用 waitFor 等弹窗关闭（最多 5s），而不是固定 sleep 后单次检查
       const cur = findCoverDialog()
-      if (cur && !isDialogGone(cur)) {
+      const closed = cur ? await waitFor(() => isDialogGone(cur), 5000, 250) : true
+      if (!closed) {
+        // Vue 可能吞掉第一次点击，补点一次再等（复用完整候选文案，避免只查「完成」落空）
+        onLog('弹窗未关闭，补点一次...')
+        const again = findConfirm(scope) || findButtonByText(BUTTON_LABELS.coverConfirm[0])
+        const againDisabled = again && (again.disabled || again.getAttribute('aria-disabled') === 'true' || /disabled/.test(again.className || ''))
+        if (again && !againDisabled) {
+          const ar = again.getBoundingClientRect()
+          again.dispatchEvent(new MouseEvent('click', {
+            bubbles: true, cancelable: true, view: window,
+            clientX: ar.left + ar.width / 2, clientY: ar.top + ar.height / 2
+          }))
+          const closed2 = await waitFor(() => isDialogGone(cur), 5000, 250)
+          if (closed2) return
+        }
         throw new Error('封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）')
       }
     } else {

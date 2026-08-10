@@ -122,7 +122,7 @@
   var BUTTON_LABELS = {
     submit: "立即投稿",
     addPart: ["添加分P", "+ 添加分P"],
-    coverConfirm: ["完成", "确定", "应用", "保存"],
+    coverConfirm: ["完成", "确定", "应用", "保存", "保存封面", "确认封面", "完成编辑", "使用此封面"],
     coverEntry: ["添加封面", "添加主封面", "封面设置", "更换封面", "选择封面", "上传封面"],
     coverFallbackEntry: ["封面", "* 封面", "添加主封面", "添加封面"]
   };
@@ -774,6 +774,9 @@
         if (fallback) break;
       }
       if (fallback) {
+        const fbText = (fallback.textContent || "").trim().slice(0, 20);
+        const fbCls = typeof fallback.className === "string" ? fallback.className.split(" ")[0] : "";
+        onLog(`（备用方案）点击「${fbText}」(${fallback.tagName}${fbCls ? "." + fbCls : ""})`);
         const fr = fallback.getBoundingClientRect();
         fallback.dispatchEvent(new MouseEvent("click", {
           bubbles: true,
@@ -782,10 +785,25 @@
           clientX: fr.left + fr.width / 2,
           clientY: fr.top + fr.height / 2
         }));
-        onLog("（备用方案）封面设置完成");
-        await sleep(500);
+        onLog("（备用方案）封面设置完成，等待弹窗关闭...");
         const cur = findCoverDialog();
-        if (cur && !isDialogGone(cur)) {
+        const closed = cur ? await waitFor(() => isDialogGone(cur), 5e3, 250) : true;
+        if (!closed) {
+          onLog("弹窗未关闭，补点一次...");
+          const again = findConfirm(scope) || findButtonByText(BUTTON_LABELS.coverConfirm[0]);
+          const againDisabled = again && (again.disabled || again.getAttribute("aria-disabled") === "true" || /disabled/.test(again.className || ""));
+          if (again && !againDisabled) {
+            const ar = again.getBoundingClientRect();
+            again.dispatchEvent(new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: ar.left + ar.width / 2,
+              clientY: ar.top + ar.height / 2
+            }));
+            const closed2 = await waitFor(() => isDialogGone(cur), 5e3, 250);
+            if (closed2) return;
+          }
           throw new Error("封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）");
         }
       } else {

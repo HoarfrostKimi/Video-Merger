@@ -60,7 +60,7 @@ export const SELECTORS = {
 export const BUTTON_LABELS = {
   submit: '立即投稿',
   addPart: ['添加分P', '+ 添加分P'],
-  coverConfirm: ['完成', '确定', '应用', '保存'],
+  coverConfirm: ['完成', '确定', '应用', '保存', '保存封面', '确认封面', '完成编辑', '使用此封面'],
   coverEntry: ['添加封面', '添加主封面', '封面设置', '更换封面', '选择封面', '上传封面'],
   coverFallbackEntry: ['封面', '* 封面', '添加主封面', '添加封面'],
 }
