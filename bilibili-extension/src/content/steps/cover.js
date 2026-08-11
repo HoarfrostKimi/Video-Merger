@@ -179,6 +179,18 @@ export async function confirmCoverDialog(onLog) {
     return null
   }
 
+  // 检查按钮是否可用（disabled / aria-disabled / is-disabled / 父级 disabled）
+  // 提升到函数顶层：主路径与 fallback 分支共用
+  const isBtnEnabled = (btn) => {
+    if (btn.disabled) return false
+    if (btn.getAttribute('aria-disabled') === 'true') return false
+    if (btn.classList.contains('is-disabled') || btn.classList.contains('disabled')) return false
+    // 检查父级（有时 disabled 状态挂在父容器上）
+    const parent = btn.closest('[class*="disabled"]')
+    if (parent && parent.contains(btn)) return false
+    return true
+  }
+
   // 验证弹窗是否真的关闭了（移除 DOM / display:none / visibility:hidden / opacity:0 均视为关闭）
   // 提升到函数顶层：主路径与 fallback 分支共用
   const isDialogGone = (el) => {
@@ -190,18 +202,10 @@ export async function confirmCoverDialog(onLog) {
     return false
   }
 
-  const doneBtn = await waitFor(() => findConfirm(scope), TIMEOUTS.coverConfirmBtn)
+  // 主路径：动态查询弹窗（Vue 重渲染会替换节点，固定引用会失效导致找不到按钮）
+  const doneBtn = await waitFor(() => findConfirm(findCoverDialog() || document), TIMEOUTS.coverConfirmBtn)
   if (doneBtn) {
     // 等待按钮变为可用（B站在上传/裁剪未完成时会 disable 按钮）
-    const isBtnEnabled = (btn) => {
-      if (btn.disabled) return false
-      if (btn.getAttribute('aria-disabled') === 'true') return false
-      if (btn.classList.contains('is-disabled') || btn.classList.contains('disabled')) return false
-      // 检查父级（有时 disabled 状态挂在父容器上）
-      const parent = btn.closest('[class*="disabled"]')
-      if (parent && parent.contains(btn)) return false
-      return true
-    }
     const enabled = await waitFor(() => isBtnEnabled(doneBtn) ? doneBtn : null, TIMEOUTS.coverConfirmEnabled)
     if (!enabled) {
       onLog('警告: 「完成」按钮 10s 后仍为禁用状态，强制点击')
@@ -259,8 +263,12 @@ export async function confirmCoverDialog(onLog) {
       const fbText = (fallback.textContent || '').trim().slice(0, 20)
       const fbCls = typeof fallback.className === 'string' ? fallback.className.split(' ')[0] : ''
       onLog(`（备用方案）点击「${fbText}」(${fallback.tagName}${fbCls ? '.' + fbCls : ''})`)
-      const fr = fallback.getBoundingClientRect()
-      fallback.dispatchEvent(new MouseEvent('click', {
+      // 点击前等按钮可用（B站封面处理未完成时按钮 disabled，直接点击无效——间歇性失败主因）
+      const ready = await waitFor(() => isBtnEnabled(fallback) ? fallback : null, TIMEOUTS.coverConfirmEnabled, 500)
+      const target = ready || fallback
+      if (!ready) onLog('警告: 「完成」按钮 10s 后仍禁用，强制点击')
+      const fr = target.getBoundingClientRect()
+      target.dispatchEvent(new MouseEvent('click', {
         bubbles: true, cancelable: true, view: window,
         clientX: fr.left + fr.width / 2, clientY: fr.top + fr.height / 2
       }))
@@ -271,9 +279,10 @@ export async function confirmCoverDialog(onLog) {
       if (!closed) {
         // Vue 可能吞掉第一次点击，补点一次再等（复用完整候选文案，避免只查「完成」落空）
         onLog('弹窗未关闭，补点一次...')
-        const again = findConfirm(scope) || findButtonByText(BUTTON_LABELS.coverConfirm[0])
-        const againDisabled = again && (again.disabled || again.getAttribute('aria-disabled') === 'true' || /disabled/.test(again.className || ''))
-        if (again && !againDisabled) {
+        const again = findConfirm(findCoverDialog() || document) || findButtonByText(BUTTON_LABELS.coverConfirm[0])
+        // 补点前同样等按钮可用
+        const againReady = again ? await waitFor(() => isBtnEnabled(again) ? again : null, 5000, 500) : null
+        if (againReady) {
           const ar = again.getBoundingClientRect()
           again.dispatchEvent(new MouseEvent('click', {
             bubbles: true, cancelable: true, view: window,

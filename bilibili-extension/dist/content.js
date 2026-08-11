@@ -703,6 +703,14 @@
       }
       return null;
     };
+    const isBtnEnabled = (btn) => {
+      if (btn.disabled) return false;
+      if (btn.getAttribute("aria-disabled") === "true") return false;
+      if (btn.classList.contains("is-disabled") || btn.classList.contains("disabled")) return false;
+      const parent = btn.closest('[class*="disabled"]');
+      if (parent && parent.contains(btn)) return false;
+      return true;
+    };
     const isDialogGone = (el) => {
       if (!el || !document.body.contains(el)) return true;
       const style = el.style;
@@ -711,16 +719,8 @@
       if (computed.display === "none" || computed.visibility === "hidden") return true;
       return false;
     };
-    const doneBtn = await waitFor(() => findConfirm(scope), TIMEOUTS.coverConfirmBtn);
+    const doneBtn = await waitFor(() => findConfirm(findCoverDialog() || document), TIMEOUTS.coverConfirmBtn);
     if (doneBtn) {
-      const isBtnEnabled = (btn) => {
-        if (btn.disabled) return false;
-        if (btn.getAttribute("aria-disabled") === "true") return false;
-        if (btn.classList.contains("is-disabled") || btn.classList.contains("disabled")) return false;
-        const parent = btn.closest('[class*="disabled"]');
-        if (parent && parent.contains(btn)) return false;
-        return true;
-      };
       const enabled = await waitFor(() => isBtnEnabled(doneBtn) ? doneBtn : null, TIMEOUTS.coverConfirmEnabled);
       if (!enabled) {
         onLog("警告: 「完成」按钮 10s 后仍为禁用状态，强制点击");
@@ -777,8 +777,11 @@
         const fbText = (fallback.textContent || "").trim().slice(0, 20);
         const fbCls = typeof fallback.className === "string" ? fallback.className.split(" ")[0] : "";
         onLog(`（备用方案）点击「${fbText}」(${fallback.tagName}${fbCls ? "." + fbCls : ""})`);
-        const fr = fallback.getBoundingClientRect();
-        fallback.dispatchEvent(new MouseEvent("click", {
+        const ready = await waitFor(() => isBtnEnabled(fallback) ? fallback : null, TIMEOUTS.coverConfirmEnabled, 500);
+        const target = ready || fallback;
+        if (!ready) onLog("警告: 「完成」按钮 10s 后仍禁用，强制点击");
+        const fr = target.getBoundingClientRect();
+        target.dispatchEvent(new MouseEvent("click", {
           bubbles: true,
           cancelable: true,
           view: window,
@@ -790,9 +793,9 @@
         const closed = cur ? await waitFor(() => isDialogGone(cur), 5e3, 250) : true;
         if (!closed) {
           onLog("弹窗未关闭，补点一次...");
-          const again = findConfirm(scope) || findButtonByText(BUTTON_LABELS.coverConfirm[0]);
-          const againDisabled = again && (again.disabled || again.getAttribute("aria-disabled") === "true" || /disabled/.test(again.className || ""));
-          if (again && !againDisabled) {
+          const again = findConfirm(findCoverDialog() || document) || findButtonByText(BUTTON_LABELS.coverConfirm[0]);
+          const againReady = again ? await waitFor(() => isBtnEnabled(again) ? again : null, 5e3, 500) : null;
+          if (againReady) {
             const ar = again.getBoundingClientRect();
             again.dispatchEvent(new MouseEvent("click", {
               bubbles: true,
