@@ -53,6 +53,11 @@ export const SELECTORS = {
     '[class*="cover-dialog"]:not([style*="display: none"])',
     '[class*="cover-modal"]:not([style*="display: none"])',
   ],
+  // 新版「封面制作」编辑器（bcc-dialog 结构）
+  // coverEditorHead 是编辑器头部的稳定锚点（内含「封面制作」文案 + 关闭按钮）
+  coverEditorHead: '.cover-editor-head',
+  // 确认按钮所在的 footer（新版「完成」按钮在右下角 footer 内）
+  coverDialogFooter: '.bcc-dialog__footer, .bcc-dialog [class*="footer"]',
   // 预览图（封面上传完成信号）
   coverPreviewImgs: 'img[src^="blob:"], img[src^="http"], img[src^="data:"]',
 }
@@ -82,7 +87,7 @@ export const TIMEOUTS = {
   coverDialogRetry2: 10000, // 封面弹窗重试2
   coverUploaded: 15000, // 封面上传完成等待
   coverGrace: 5000, // 封面上传超时宽限
-  coverConfirmBtn: 6000, // 封面确认按钮出现
+  coverConfirmBtn: 15000, // 封面确认按钮出现（新版编辑器要等封面处理完才渲染按钮）
   coverConfirmEnabled: 10000, // 封面确认按钮可用
   frameCapture: 30000, // 视频截帧超时（大文件/页面短暂不可见需要更长时间）
   submitWait: 30000, // 立即投稿按钮可用等待

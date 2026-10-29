@@ -1,6 +1,9 @@
 // core/find.js - DOM 定位工具：按选择器/文本/内容特征查找可点击元素与弹窗
 import { SELECTORS, TEXT_KEYWORDS } from '../config.js'
 
+/** 文本归一化：去全部空白（B站按钮文案常带空格/换行，如「确 定」，需归一化后比较） */
+export const normalizeText = (s) => (s || '').replace(/\s+/g, '')
+
 /** 查找B站上传页面的文件输入框 */
 export function findFileInput() {
   for (const sel of SELECTORS.fileInputSelectors) {
@@ -25,7 +28,7 @@ export function findButtonByText(text) {
       .map(n => n.textContent)
       .join('')
       .trim()
-    if (directText === text) {
+    if (normalizeText(directText) === normalizeText(text)) {
       if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
         bestMatch = el
       }
@@ -44,7 +47,7 @@ export function findButtonInScope(text, scope) {
       .map(n => n.textContent)
       .join('')
       .trim()
-    if (directText === text) {
+    if (normalizeText(directText) === normalizeText(text)) {
       if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
         bestMatch = el
       }
@@ -75,6 +78,26 @@ export function toClickable(el) {
   return el
 }
 
+/** 模拟完整点击序列（pointerdown → pointerup → click），兼容只监听 pointer 事件的组件 */
+export function dispatchClickSequence(el) {
+  const rect = el.getBoundingClientRect()
+  const opts = {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    composed: true,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+  }
+  try {
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }))
+    el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }))
+  } catch (e) {
+    // 环境不支持 PointerEvent 时退回仅 click
+  }
+  el.dispatchEvent(new MouseEvent('click', opts))
+}
+
 /** 通过文本查找并点击下拉选项 */
 export function clickDropdownOption(text) {
   // 查找所有可见的下拉菜单项
@@ -103,6 +126,26 @@ export function findCoverDialog() {
   // 排除助手面板自身：面板是 fixed 定位、高 z-index、且内含 file input，
   // 不排除会被兜底检测误判为“封面弹窗”，导致弹窗关闭验证/按钮查找全部失效
   const isSelfPanel = (el) => el && (el.id === 'bili-helper-panel' || (el.closest && el.closest('#bili-helper-panel')))
+
+  // 0. 新版「封面制作」编辑器（bcc-dialog 结构）：以 .cover-editor-head 为锚点，
+  //    向上取「最外层的 dialog/modal 类祖先」作为完整弹窗容器（含 header + body + footer）。
+  //    不能用策略 2 的首个遮罩类祖先：中途带 cover/crop 类的内部小容器会先命中，
+  //    返回的容器不含 footer，「完成」按钮查找必然落空（2026-08 批量投稿失败主因）
+  for (const head of document.querySelectorAll(SELECTORS.coverEditorHead)) {
+    if (isSelfPanel(head)) continue
+    let node = head.parentElement
+    let dialogRoot = null
+    while (node && node !== document.body) {
+      if (node.id === 'bili-helper-panel') break
+      const cls = (node.className || '').toString().toLowerCase()
+      if (cls.includes('dialog') || cls.includes('modal')) dialogRoot = node // 持续上溯，保留最外层
+      node = node.parentElement
+    }
+    if (dialogRoot) {
+      const style = window.getComputedStyle(dialogRoot)
+      if (style.display !== 'none' && style.visibility !== 'hidden') return dialogRoot
+    }
+  }
 
   // 1. 已知选择器（兼容旧版）
   const known = document.querySelector(SELECTORS.coverDialogKnown.join(', '))
@@ -150,24 +193,32 @@ export function findCoverDialog() {
   // 从候选元素向上查找弹窗/遮罩容器
   for (const el of candidates) {
     let node = el
+    let outermostDialog = null // 最外层的 dialog/modal 容器（范围完整，包含 footer 按钮）
+    let firstOverlay = null // 首个命中的遮罩类容器（找不到 dialog 类祖先时的兜底）
     while (node && node !== document.body) {
       if (node.id === 'bili-helper-panel') break // 绝不把助手面板当弹窗返回
       const style = window.getComputedStyle(node)
       const cls = (node.className || '').toString().toLowerCase()
       const zIndex = parseInt(style.zIndex) || 0
+      const visible = style.display !== 'none' && style.visibility !== 'hidden'
+      const isDialogish = (
+        cls.includes('dialog') || cls.includes('modal') ||
+        node.getAttribute('role') === 'dialog' || node.getAttribute('role') === 'alertdialog'
+      )
       const isOverlay = (
+        isDialogish ||
         style.position === 'fixed' || style.position === 'absolute' ||
-        cls.includes('dialog') || cls.includes('modal') || cls.includes('overlay') ||
-        cls.includes('popup') || cls.includes('drawer') || cls.includes('mask') ||
+        cls.includes('overlay') || cls.includes('popup') || cls.includes('drawer') || cls.includes('mask') ||
         cls.includes('crop') || cls.includes('cover') ||
-        node.getAttribute('role') === 'dialog' || node.getAttribute('role') === 'alertdialog' ||
         zIndex > 50
       )
-      if (isOverlay && style.display !== 'none' && style.visibility !== 'hidden') {
-        return node
-      }
+      if (visible && isDialogish) outermostDialog = node
+      if (visible && isOverlay && !firstOverlay) firstOverlay = node
       node = node.parentElement
     }
+    // 优先返回最外层 dialog 容器（范围完整），其次首个遮罩容器（旧行为兜底）
+    if (outermostDialog) return outermostDialog
+    if (firstOverlay) return firstOverlay
   }
 
   // 3. 兜底：查找任何 fixed/absolute 遮罩层（z-index > 50）内含封面相关内容

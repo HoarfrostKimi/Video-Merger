@@ -116,6 +116,11 @@
       '[class*="cover-dialog"]:not([style*="display: none"])',
       '[class*="cover-modal"]:not([style*="display: none"])'
     ],
+    // 新版「封面制作」编辑器（bcc-dialog 结构）
+    // coverEditorHead 是编辑器头部的稳定锚点（内含「封面制作」文案 + 关闭按钮）
+    coverEditorHead: ".cover-editor-head",
+    // 确认按钮所在的 footer（新版「完成」按钮在右下角 footer 内）
+    coverDialogFooter: '.bcc-dialog__footer, .bcc-dialog [class*="footer"]',
     // 预览图（封面上传完成信号）
     coverPreviewImgs: 'img[src^="blob:"], img[src^="http"], img[src^="data:"]'
   };
@@ -151,8 +156,8 @@
     // 封面上传完成等待
     coverGrace: 5e3,
     // 封面上传超时宽限
-    coverConfirmBtn: 6e3,
-    // 封面确认按钮出现
+    coverConfirmBtn: 15e3,
+    // 封面确认按钮出现（新版编辑器要等封面处理完才渲染按钮）
     coverConfirmEnabled: 1e4,
     // 封面确认按钮可用
     frameCapture: 3e4,
@@ -185,6 +190,7 @@
   var VIDEO_EXTENSIONS = [".mp4", ".flv", ".mkv", ".avi", ".mov", ".webm"];
 
   // src/content/core/find.js
+  var normalizeText = (s) => (s || "").replace(/\s+/g, "");
   function findFileInput() {
     for (const sel of SELECTORS.fileInputSelectors) {
       const el = document.querySelector(sel);
@@ -200,7 +206,7 @@
     let bestMatch = null;
     for (const el of all) {
       const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-      if (directText === text) {
+      if (normalizeText(directText) === normalizeText(text)) {
         if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
           bestMatch = el;
         }
@@ -213,7 +219,7 @@
     let bestMatch = null;
     for (const el of all) {
       const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-      if (directText === text) {
+      if (normalizeText(directText) === normalizeText(text)) {
         if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
           bestMatch = el;
         }
@@ -240,6 +246,23 @@
     }
     return el;
   }
+  function dispatchClickSequence(el) {
+    const rect = el.getBoundingClientRect();
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      composed: true,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2
+    };
+    try {
+      el.dispatchEvent(new PointerEvent("pointerdown", { ...opts, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+      el.dispatchEvent(new PointerEvent("pointerup", { ...opts, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+    } catch (e) {
+    }
+    el.dispatchEvent(new MouseEvent("click", opts));
+  }
   function clickDropdownOption(text) {
     const items = document.querySelectorAll(SELECTORS.dropdownItems);
     for (const item of items) {
@@ -255,6 +278,21 @@
   }
   function findCoverDialog() {
     const isSelfPanel = (el) => el && (el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel"));
+    for (const head of document.querySelectorAll(SELECTORS.coverEditorHead)) {
+      if (isSelfPanel(head)) continue;
+      let node = head.parentElement;
+      let dialogRoot = null;
+      while (node && node !== document.body) {
+        if (node.id === "bili-helper-panel") break;
+        const cls = (node.className || "").toString().toLowerCase();
+        if (cls.includes("dialog") || cls.includes("modal")) dialogRoot = node;
+        node = node.parentElement;
+      }
+      if (dialogRoot) {
+        const style = window.getComputedStyle(dialogRoot);
+        if (style.display !== "none" && style.visibility !== "hidden") return dialogRoot;
+      }
+    }
     const known = document.querySelector(SELECTORS.coverDialogKnown.join(", "));
     if (known && !isSelfPanel(known)) return known;
     const candidates = [];
@@ -287,17 +325,22 @@
     }
     for (const el of candidates) {
       let node = el;
+      let outermostDialog = null;
+      let firstOverlay = null;
       while (node && node !== document.body) {
         if (node.id === "bili-helper-panel") break;
         const style = window.getComputedStyle(node);
         const cls = (node.className || "").toString().toLowerCase();
         const zIndex = parseInt(style.zIndex) || 0;
-        const isOverlay = style.position === "fixed" || style.position === "absolute" || cls.includes("dialog") || cls.includes("modal") || cls.includes("overlay") || cls.includes("popup") || cls.includes("drawer") || cls.includes("mask") || cls.includes("crop") || cls.includes("cover") || node.getAttribute("role") === "dialog" || node.getAttribute("role") === "alertdialog" || zIndex > 50;
-        if (isOverlay && style.display !== "none" && style.visibility !== "hidden") {
-          return node;
-        }
+        const visible = style.display !== "none" && style.visibility !== "hidden";
+        const isDialogish = cls.includes("dialog") || cls.includes("modal") || node.getAttribute("role") === "dialog" || node.getAttribute("role") === "alertdialog";
+        const isOverlay = isDialogish || style.position === "fixed" || style.position === "absolute" || cls.includes("overlay") || cls.includes("popup") || cls.includes("drawer") || cls.includes("mask") || cls.includes("crop") || cls.includes("cover") || zIndex > 50;
+        if (visible && isDialogish) outermostDialog = node;
+        if (visible && isOverlay && !firstOverlay) firstOverlay = node;
         node = node.parentElement;
       }
+      if (outermostDialog) return outermostDialog;
+      if (firstOverlay) return firstOverlay;
     }
     const allContainers = document.querySelectorAll("div, section, aside, article");
     for (const ov of allContainers) {
@@ -361,7 +404,13 @@
     grab("创作声明select", SELECTORS.declarationSelect);
     grab("上传file input", 'input[type="file"]');
     const coverDialog = findCoverDialog();
-    snap["封面弹窗"] = coverDialog ? coverDialog.outerHTML.slice(0, 800) : null;
+    snap["封面弹窗"] = coverDialog ? coverDialog.outerHTML.slice(0, 1200) : null;
+    const coverFooter = document.querySelector(SELECTORS.coverDialogFooter);
+    snap["封面弹窗footer"] = coverFooter ? coverFooter.outerHTML.slice(0, 600) : null;
+    if (coverDialog) {
+      const btnTexts = Array.from(coverDialog.querySelectorAll('button, [class*="btn"], [class*="button"], [role="button"]')).map((b) => (b.textContent || "").trim().replace(/\s+/g, " ")).filter(Boolean);
+      snap["封面弹窗按钮文案"] = btnTexts.length ? JSON.stringify(btnTexts.slice(0, 20)) : null;
+    }
     const submitBtn = findButtonByText("立即投稿");
     snap["立即投稿按钮"] = submitBtn ? submitBtn.outerHTML.slice(0, 300) : null;
     return snap;
@@ -566,6 +615,387 @@
     await sleep(TIMEOUTS.visibilitySettle);
   }
 
+  // src/content/core/mp4.js
+  function u16At(u8, off) {
+    return u8[off] << 8 | u8[off + 1];
+  }
+  function u32At(u8, off) {
+    return (u8[off] << 24 | u8[off + 1] << 16 | u8[off + 2] << 8 | u8[off + 3]) >>> 0;
+  }
+  function u64At(u8, off) {
+    return u32At(u8, off) * 4294967296 + u32At(u8, off + 4);
+  }
+  function typeAt(u8, off) {
+    return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]);
+  }
+  function* iterateBoxes(u8, start, end) {
+    let off = start;
+    while (off + 8 <= end) {
+      let size = u32At(u8, off);
+      let headerSize = 8;
+      if (size === 1) {
+        if (off + 16 > end) return;
+        size = u64At(u8, off + 8);
+        headerSize = 16;
+      } else if (size === 0) {
+        size = end - off;
+      }
+      if (size < headerSize || off + size > end) return;
+      yield { type: typeAt(u8, off + 4), start: off, size, headerSize, contentStart: off + headerSize, contentEnd: off + size };
+      off += size;
+    }
+  }
+  function* scanTopBoxHeaders(u8, start, end) {
+    let off = start;
+    while (off + 8 <= end) {
+      let size = u32At(u8, off);
+      let headerSize = 8;
+      if (size === 1) {
+        if (off + 16 > end) return;
+        size = u64At(u8, off + 8);
+        headerSize = 16;
+      }
+      if (size < headerSize) return;
+      yield { type: typeAt(u8, off + 4), start: off, size, headerSize };
+      if (size === 0) return;
+      off += size;
+    }
+  }
+  var hex2 = (n) => n.toString(16).padStart(2, "0");
+  function parseStsd(buf, stsd) {
+    for (const entry of iterateBoxes(buf, stsd.contentStart + 8, stsd.contentEnd)) {
+      if (entry.type === "avc1" || entry.type === "avc3") {
+        const width = u16At(buf, entry.contentStart + 24);
+        const height = u16At(buf, entry.contentStart + 26);
+        let avcC = null;
+        for (const child of iterateBoxes(buf, entry.contentStart + 78, entry.contentEnd)) {
+          if (child.type === "avcC") {
+            avcC = child;
+            break;
+          }
+        }
+        if (!avcC) continue;
+        const p = avcC.contentStart;
+        const codec = "avc1." + hex2(buf[p + 1]) + hex2(buf[p + 2]) + hex2(buf[p + 3]);
+        const description = buf.slice(avcC.contentStart, avcC.contentEnd);
+        return { codec, description, width, height };
+      }
+      if (entry.type === "hev1" || entry.type === "hvc1") {
+        return { unsupported: `HEVC(${entry.type}) 编码暂不支持 WebCodecs 截帧` };
+      }
+    }
+    return null;
+  }
+  function parseMoovVideoTrack(moov) {
+    let top = null;
+    for (const b of iterateBoxes(moov, 0, moov.length)) {
+      top = b;
+      break;
+    }
+    if (!top || top.type !== "moov") return null;
+    for (const trak of iterateBoxes(moov, top.contentStart, top.contentEnd)) {
+      if (trak.type !== "trak") continue;
+      const track = parseTrak(moov, trak);
+      if (track) return track;
+    }
+    return null;
+  }
+  function parseTrak(buf, trak) {
+    let mdia = null;
+    for (const b of iterateBoxes(buf, trak.contentStart, trak.contentEnd)) {
+      if (b.type === "mdia") {
+        mdia = b;
+        break;
+      }
+    }
+    if (!mdia) return null;
+    let hdlr = null, mdhd = null, minf = null;
+    for (const b of iterateBoxes(buf, mdia.contentStart, mdia.contentEnd)) {
+      if (b.type === "hdlr") hdlr = b;
+      else if (b.type === "mdhd") mdhd = b;
+      else if (b.type === "minf") minf = b;
+    }
+    if (!hdlr || !mdhd || !minf) return null;
+    if (typeAt(buf, hdlr.contentStart + 8) !== "vide") return null;
+    const mdhdVersion = buf[mdhd.contentStart];
+    const timescale = u32At(buf, mdhd.contentStart + (mdhdVersion === 1 ? 20 : 12));
+    if (!timescale) return null;
+    let stbl = null;
+    for (const b of iterateBoxes(buf, minf.contentStart, minf.contentEnd)) {
+      if (b.type === "stbl") {
+        stbl = b;
+        break;
+      }
+    }
+    if (!stbl) return null;
+    const t = {};
+    for (const b of iterateBoxes(buf, stbl.contentStart, stbl.contentEnd)) {
+      t[b.type] = b;
+    }
+    if (!t.stsd || !t.stts || !t.stsc || !t.stsz || !(t.stco || t.co64)) return null;
+    const codecInfo = parseStsd(buf, t.stsd);
+    if (!codecInfo) return null;
+    if (codecInfo.unsupported) return { unsupported: codecInfo.unsupported };
+    const sttsPairs = [];
+    const sttsCount = u32At(buf, t.stts.contentStart + 4);
+    for (let i = 0; i < sttsCount; i++) {
+      const off = t.stts.contentStart + 8 + i * 8;
+      sttsPairs.push({ count: u32At(buf, off), delta: u32At(buf, off + 4) });
+    }
+    let keyframes = null;
+    if (t.stss) {
+      const n = u32At(buf, t.stss.contentStart + 4);
+      keyframes = [];
+      for (let i = 0; i < n; i++) keyframes.push(u32At(buf, t.stss.contentStart + 8 + i * 4) - 1);
+    }
+    const stscEntries = [];
+    const stscCount = u32At(buf, t.stsc.contentStart + 4);
+    for (let i = 0; i < stscCount; i++) {
+      const off = t.stsc.contentStart + 8 + i * 12;
+      stscEntries.push({ firstChunk: u32At(buf, off), samplesPerChunk: u32At(buf, off + 4) });
+    }
+    const uniformSize = u32At(buf, t.stsz.contentStart + 4);
+    const sampleCount = u32At(buf, t.stsz.contentStart + 8);
+    if (!sampleCount) return null;
+    let sampleSizes = null;
+    if (uniformSize === 0) {
+      sampleSizes = new Uint32Array(sampleCount);
+      for (let i = 0; i < sampleCount; i++) sampleSizes[i] = u32At(buf, t.stsz.contentStart + 12 + i * 4);
+    }
+    const chunkBox = t.co64 || t.stco;
+    const chunkCount = u32At(buf, chunkBox.contentStart + 4);
+    const chunkOffsets = new Float64Array(chunkCount);
+    for (let i = 0; i < chunkCount; i++) {
+      const off = chunkBox.contentStart + 8 + i * (t.co64 ? 8 : 4);
+      chunkOffsets[i] = t.co64 ? u64At(buf, off) : u32At(buf, off);
+    }
+    const pts = new Float64Array(sampleCount);
+    let acc = 0, idx = 0;
+    for (const { count, delta } of sttsPairs) {
+      for (let k = 0; k < count && idx < sampleCount; k++, idx++) {
+        pts[idx] = acc;
+        acc += delta;
+      }
+    }
+    return {
+      timescale,
+      codec: codecInfo.codec,
+      description: codecInfo.description,
+      width: codecInfo.width,
+      height: codecInfo.height,
+      sampleCount,
+      pts,
+      keyframes,
+      sampleSizes,
+      uniformSize,
+      stscEntries,
+      chunkCount,
+      chunkOffsets
+    };
+  }
+  function sampleSize(track, i) {
+    return track.sampleSizes ? track.sampleSizes[i] : track.uniformSize;
+  }
+  function sampleFileOffset(track, i) {
+    if (i < 0 || i >= track.sampleCount) return -1;
+    const { stscEntries, chunkOffsets, chunkCount } = track;
+    let covered = 0;
+    for (let e = 0; e < stscEntries.length; e++) {
+      const { firstChunk, samplesPerChunk } = stscEntries[e];
+      if (samplesPerChunk <= 0) return -1;
+      const nextFirst = e + 1 < stscEntries.length ? stscEntries[e + 1].firstChunk : chunkCount + 1;
+      const chunkSpan = nextFirst - firstChunk;
+      if (chunkSpan <= 0) return -1;
+      const samplesInEntry = chunkSpan * samplesPerChunk;
+      if (i < covered + samplesInEntry) {
+        const local = i - covered;
+        const chunkIdx = firstChunk - 1 + Math.floor(local / samplesPerChunk);
+        if (chunkIdx < 0 || chunkIdx >= chunkCount) return -1;
+        const idxInChunk = local % samplesPerChunk;
+        let off = chunkOffsets[chunkIdx];
+        for (let k = i - idxInChunk; k < i; k++) off += sampleSize(track, k);
+        return off;
+      }
+      covered += samplesInEntry;
+    }
+    return -1;
+  }
+  function pickKeyframeIndex(track, atSeconds) {
+    const limit = atSeconds * track.timescale;
+    if (track.keyframes && track.keyframes.length) {
+      let target2 = track.keyframes[0];
+      for (const k of track.keyframes) {
+        if (track.pts[k] <= limit) target2 = k;
+        else break;
+      }
+      return target2;
+    }
+    let target = 0;
+    for (let i = 0; i < track.sampleCount && track.pts[i] <= limit; i++) target = i;
+    return target;
+  }
+  async function locateKeyframeInMp4(file, atSeconds = 2) {
+    if (!file || typeof file.slice !== "function" || !file.size) throw new Error("无效的文件对象");
+    if (file.size < 16) throw new Error("文件过小，不是有效 MP4");
+    const headLen = Math.min(file.size, 256 * 1024);
+    const head = new Uint8Array(await file.slice(0, headLen).arrayBuffer());
+    let moov = null;
+    for (const b of scanTopBoxHeaders(head, 0, head.length)) {
+      if (b.type === "moov") {
+        moov = new Uint8Array(await file.slice(b.start, b.start + b.size).arrayBuffer());
+        break;
+      }
+      if (b.type === "mdat") break;
+    }
+    if (!moov) moov = await readMoovFromTail(file);
+    const track = parseMoovVideoTrack(moov);
+    if (!track) throw new Error("未找到视频轨（可能不是标准 MP4）");
+    if (track.unsupported) throw new Error(track.unsupported);
+    const keyframeIndex = pickKeyframeIndex(track, atSeconds);
+    const offset = sampleFileOffset(track, keyframeIndex);
+    const size = sampleSize(track, keyframeIndex);
+    if (offset < 0 || size <= 0 || offset + size > file.size) throw new Error("关键帧样本定位失败（样本表异常）");
+    const sampleBuffer = await file.slice(offset, offset + size).arrayBuffer();
+    return {
+      codec: track.codec,
+      description: track.description,
+      width: track.width,
+      height: track.height,
+      timestampUs: Math.round(track.pts[keyframeIndex] / track.timescale * 1e6),
+      keyframeIndex,
+      keyframeSec: track.pts[keyframeIndex] / track.timescale,
+      sampleBuffer
+    };
+  }
+  async function readMoovFromTail(file) {
+    const tailLen = Math.min(file.size, 16 * 1024 * 1024);
+    const tailStart = file.size - tailLen;
+    const tail = new Uint8Array(await file.slice(tailStart, file.size).arrayBuffer());
+    const isMoov = (i) => tail[i] === 109 && tail[i + 1] === 111 && tail[i + 2] === 111 && tail[i + 3] === 118;
+    let looseTries = 0;
+    for (const strict of [true, false]) {
+      for (let i = tail.length - 4; i >= 4; i--) {
+        if (!isMoov(i)) continue;
+        const boxStart = tailStart + i - 4;
+        const moovSize = u32At(tail, i - 4);
+        if (moovSize < 16 || moovSize > 64 * 1024 * 1024) continue;
+        if (boxStart < 0 || boxStart + moovSize > file.size) continue;
+        if (strict && boxStart + moovSize !== file.size) continue;
+        if (!strict) {
+          if (moovSize > 16 * 1024 * 1024 || looseTries >= 5) continue;
+          looseTries++;
+        }
+        const cand = new Uint8Array(await file.slice(boxStart, boxStart + moovSize).arrayBuffer());
+        if (parseMoovVideoTrack(cand)) return cand;
+      }
+    }
+    return null;
+  }
+
+  // src/content/core/webcodecsFrame.js
+  async function captureFrameWithWebCodecs(file, atSeconds = 2, timeoutMs = 15e3) {
+    if (typeof window === "undefined" || !("VideoDecoder" in window) || !("EncodedVideoChunk" in window)) {
+      throw new Error("浏览器不支持 WebCodecs");
+    }
+    if (typeof OffscreenCanvas === "undefined") {
+      throw new Error("浏览器不支持 OffscreenCanvas");
+    }
+    const info = await locateKeyframeInMp4(file, atSeconds);
+    const config = { codec: info.codec, description: info.description, optimizeForLatency: true };
+    if (info.width) config.codedWidth = info.width;
+    if (info.height) config.codedHeight = info.height;
+    let support;
+    try {
+      support = await VideoDecoder.isConfigSupported(config);
+    } catch (e) {
+      throw new Error(`解码配置无法识别(${info.codec}): ${e.message}`);
+    }
+    if (!support || !support.supported) {
+      throw new Error(`浏览器不支持该视频编码(${info.codec})`);
+    }
+    const frame = await decodeOneFrame(config, info.sampleBuffer, info.timestampUs, timeoutMs);
+    try {
+      return await drawFrameToJpeg(frame);
+    } finally {
+      frame.close();
+    }
+  }
+  function decodeOneFrame(config, data, timestampUs, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let decoder = null;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          if (decoder && decoder.state !== "closed") decoder.close();
+        } catch (e) {
+        }
+        reject(new Error("WebCodecs 解码超时"));
+      }, timeoutMs);
+      try {
+        decoder = new VideoDecoder({
+          output: (frame) => {
+            if (settled) {
+              frame.close();
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
+            resolve(frame);
+            setTimeout(() => {
+              try {
+                decoder.close();
+              } catch (e) {
+              }
+            }, 0);
+          },
+          error: (e) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error(`解码失败: ${e && e.message || e}`));
+          }
+        });
+        decoder.configure(config);
+        decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: timestampUs, data }));
+        decoder.flush().catch(() => {
+        });
+      } catch (e) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(`解码启动失败: ${e.message}`));
+        }
+      }
+    });
+  }
+  async function drawFrameToJpeg(frame) {
+    const vw = frame.displayWidth || frame.codedWidth;
+    const vh = frame.displayHeight || frame.codedHeight;
+    if (!vw || !vh) throw new Error("解码帧尺寸无效");
+    const targetRatio = 4 / 3;
+    const videoRatio = vw / vh;
+    let sx, sy, sw, sh;
+    if (videoRatio > targetRatio) {
+      sh = vh;
+      sw = vh * targetRatio;
+      sx = (vw - sw) / 2;
+      sy = 0;
+    } else {
+      sw = vw;
+      sh = vw / targetRatio;
+      sx = 0;
+      sy = (vh - sh) / 2;
+    }
+    const canvas = new OffscreenCanvas(Math.round(sw), Math.round(sh));
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
+    if (!blob) throw new Error("JPEG 编码失败");
+    return blob;
+  }
+
   // src/content/steps/cover.js
   async function captureFrameFromFile(file) {
     return new Promise((resolve, reject) => {
@@ -643,6 +1073,24 @@
       }, TIMEOUTS.frameCapture);
     });
   }
+  async function captureFrameSmart(file, onLog) {
+    const hasWebCodecs = typeof window !== "undefined" && "VideoDecoder" in window && "EncodedVideoChunk" in window && typeof OffscreenCanvas !== "undefined";
+    if (hasWebCodecs) {
+      try {
+        const blob = await captureFrameWithWebCodecs(file);
+        onLog("（截帧方式: WebCodecs 解码，页面可见性无影响）");
+        return blob;
+      } catch (err) {
+        onLog(`提示: WebCodecs 截帧不可用(${err.message})，回退 video 元素方案`);
+      }
+    } else {
+      onLog("提示: 当前浏览器不支持 WebCodecs，使用 video 元素截帧");
+    }
+    if (document.hidden) {
+      throw new Error("页面不可见且 WebCodecs 截帧不可用（浏览器挂起 video 元素解码）");
+    }
+    return captureFrameFromFile(file);
+  }
   function setFileToInput(input, file) {
     const dt = new DataTransfer();
     dt.items.add(file);
@@ -695,20 +1143,28 @@
     if (!dialog) {
       onLog("警告: 未检测到封面弹窗，将按全页面范围查找「完成」按钮");
     }
-    const scope = dialog || document;
-    const findConfirm = (root) => {
+    const findConfirm = () => {
+      const dlg = findCoverDialog();
+      const root = dlg || document;
       for (const lbl of BUTTON_LABELS.coverConfirm) {
         const b = findButtonInScope(lbl, root);
         if (b) return b;
       }
+      const footer = (dlg || document).querySelector(SELECTORS.coverDialogFooter);
+      if (footer) {
+        const btns = Array.from(footer.querySelectorAll('button, [role="button"], [class*="button"], [class*="btn"]')).filter((b) => (b.textContent || "").trim().length > 0);
+        const primary = btns.find((b) => /primary|submit|confirm|main/i.test((b.className || "").toString()));
+        const pick = primary || btns[btns.length - 1];
+        if (pick) return toClickable(pick);
+      }
       return null;
     };
-    const isBtnEnabled = (btn) => {
-      if (btn.disabled) return false;
-      if (btn.getAttribute("aria-disabled") === "true") return false;
-      if (btn.classList.contains("is-disabled") || btn.classList.contains("disabled")) return false;
-      const parent = btn.closest('[class*="disabled"]');
-      if (parent && parent.contains(btn)) return false;
+    const isBtnEnabled = (btn2) => {
+      if (btn2.disabled) return false;
+      if (btn2.getAttribute("aria-disabled") === "true") return false;
+      if (btn2.classList.contains("is-disabled") || btn2.classList.contains("disabled")) return false;
+      const parent = btn2.closest('[class*="disabled"]');
+      if (parent && parent.contains(btn2)) return false;
       return true;
     };
     const isDialogGone = (el) => {
@@ -719,101 +1175,48 @@
       if (computed.display === "none" || computed.visibility === "hidden") return true;
       return false;
     };
-    const doneBtn = await waitFor(() => findConfirm(findCoverDialog() || document), TIMEOUTS.coverConfirmBtn);
-    if (doneBtn) {
-      const enabled = await waitFor(() => isBtnEnabled(doneBtn) ? doneBtn : null, TIMEOUTS.coverConfirmEnabled);
-      if (!enabled) {
-        onLog("警告: 「完成」按钮 10s 后仍为禁用状态，强制点击");
+    const isEditorHeadGone = () => {
+      for (const h of document.querySelectorAll(SELECTORS.coverEditorHead)) {
+        const rect = h.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return false;
       }
-      const rect = doneBtn.getBoundingClientRect();
-      doneBtn.dispatchEvent(new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: rect.left + rect.width / 2,
-        clientY: rect.top + rect.height / 2
-      }));
-      onLog("封面设置完成");
-      if (dialog) {
-        await new Promise((resolve) => {
-          let tries = 0;
-          const check = () => {
-            tries++;
-            if (isDialogGone(dialog) || tries > TIMEOUTS.dialogGoneMaxTries) resolve();
-            else setTimeout(check, TIMEOUTS.dialogGoneInterval);
-          };
-          check();
-        });
-        if (!isDialogGone(dialog)) {
-          onLog("警告: 封面弹窗似乎未关闭，将重试...");
-          await sleep(500);
-          const currentDialog = findCoverDialog() || dialog;
-          const retryBtn = findConfirm(currentDialog);
-          if (retryBtn) {
-            const r = retryBtn.getBoundingClientRect();
-            retryBtn.dispatchEvent(new MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              clientX: r.left + r.width / 2,
-              clientY: r.top + r.height / 2
-            }));
-            await sleep(1e3);
-          }
-          if (!isDialogGone(currentDialog)) {
-            throw new Error("封面弹窗重试后仍未关闭（已中止该视频，请手动设置封面）");
-          }
-        }
-      }
-    } else {
+      return true;
+    };
+    const isCoverDialogClosed = () => {
+      const cur = findCoverDialog();
+      if (!cur) return true;
+      return isDialogGone(cur) || isEditorHeadGone();
+    };
+    let btn = await waitFor(findConfirm, TIMEOUTS.coverConfirmBtn);
+    if (!btn) {
       onLog("提示: 未找到完成按钮");
-      const dialogNow = findCoverDialog();
-      let fallback = null;
-      for (const lbl of BUTTON_LABELS.coverConfirm) {
-        fallback = (dialogNow ? findButtonInScope(lbl, dialogNow) : null) || findButtonByText(lbl);
-        if (fallback) break;
-      }
-      if (fallback) {
-        const fbText = (fallback.textContent || "").trim().slice(0, 20);
-        const fbCls = typeof fallback.className === "string" ? fallback.className.split(" ")[0] : "";
-        onLog(`（备用方案）点击「${fbText}」(${fallback.tagName}${fbCls ? "." + fbCls : ""})`);
-        const ready = await waitFor(() => isBtnEnabled(fallback) ? fallback : null, TIMEOUTS.coverConfirmEnabled, 500);
-        const target = ready || fallback;
-        if (!ready) onLog("警告: 「完成」按钮 10s 后仍禁用，强制点击");
-        const fr = target.getBoundingClientRect();
-        target.dispatchEvent(new MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX: fr.left + fr.width / 2,
-          clientY: fr.top + fr.height / 2
-        }));
-        onLog("（备用方案）封面设置完成，等待弹窗关闭...");
-        const cur = findCoverDialog();
-        const closed = cur ? await waitFor(() => isDialogGone(cur), 5e3, 250) : true;
-        if (!closed) {
-          onLog("弹窗未关闭，补点一次...");
-          const again = findConfirm(findCoverDialog() || document) || findButtonByText(BUTTON_LABELS.coverConfirm[0]);
-          const againReady = again ? await waitFor(() => isBtnEnabled(again) ? again : null, 5e3, 500) : null;
-          if (againReady) {
-            const ar = again.getBoundingClientRect();
-            again.dispatchEvent(new MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              clientX: ar.left + ar.width / 2,
-              clientY: ar.top + ar.height / 2
-            }));
-            const closed2 = await waitFor(() => isDialogGone(cur), 5e3, 250);
-            if (closed2) return;
-          }
-          throw new Error("封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）");
+      const footer = document.querySelector(SELECTORS.coverDialogFooter);
+      onLog(`封面弹窗按钮区: ${footer ? footer.outerHTML.slice(0, 300).replace(/\s+/g, " ") : "(未找到 footer)"}`);
+      throw new Error("未找到封面「完成」按钮（已中止该视频，请手动设置封面）");
+    }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (attempt > 1) {
+        if (isCoverDialogClosed()) {
+          onLog("封面弹窗已关闭");
+          await sleep(500);
+          return;
         }
-      } else {
-        throw new Error("未找到封面「完成」按钮（已中止该视频，请手动设置封面）");
+        btn = await waitFor(findConfirm, 5e3) || btn;
+      }
+      const enabled = await waitFor(() => isBtnEnabled(btn) ? btn : null, TIMEOUTS.coverConfirmEnabled, 500);
+      if (!enabled) {
+        onLog(`警告: 「完成」按钮 ${TIMEOUTS.coverConfirmEnabled / 1e3}s 后仍为禁用状态，强制点击`);
+      }
+      onLog(attempt === 1 ? "已点击「完成」，等待弹窗关闭..." : `弹窗未关闭，第 ${attempt} 次点击「完成」...`);
+      dispatchClickSequence(btn);
+      const closed = await waitFor(isCoverDialogClosed, 5e3, 250);
+      if (closed) {
+        onLog("封面弹窗已关闭");
+        await sleep(500);
+        return;
       }
     }
-    await sleep(500);
+    throw new Error("封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）");
   }
   async function stepSetCover(file, onLog) {
     onLog("设置封面...");
@@ -899,14 +1302,9 @@
       throw new Error("封面弹窗三次尝试后仍未出现（已中止该视频，请手动设置封面）");
     }
     onLog("封面弹窗已打开");
-    if (document.hidden) {
-      onLog("⚠️ 页面不可见（电脑黑屏或窗口最小化），浏览器挂起视频解码，跳过截帧，改用系统封面");
-      await useRecommendedCover(onLog);
-      return;
-    }
     let frameBlob;
     try {
-      frameBlob = await captureFrameFromFile(file);
+      frameBlob = await captureFrameSmart(file, onLog);
       onLog("视频截帧成功");
     } catch (err) {
       if (document.hidden) {

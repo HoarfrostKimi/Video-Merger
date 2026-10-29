@@ -1,7 +1,8 @@
 // steps/cover.js - Step 6: 视频截帧 + 封面上传与确认（逻辑最重的一步）
 import { sleep, waitFor } from '../core/wait.js'
-import { findButtonByText, findButtonInScope, findCoverDialog } from '../core/find.js'
-import { BUTTON_LABELS, TIMEOUTS } from '../config.js'
+import { findButtonByText, findButtonInScope, findCoverDialog, toClickable, dispatchClickSequence } from '../core/find.js'
+import { BUTTON_LABELS, TIMEOUTS, SELECTORS } from '../config.js'
+import { captureFrameWithWebCodecs } from '../core/webcodecsFrame.js'
 
 /**
  * 从视频文件中截取一帧作为封面图片
@@ -103,6 +104,33 @@ export async function captureFrameFromFile(file) {
   })
 }
 
+/**
+ * 智能截帧调度：
+ *   1. 优先 WebCodecs（mp4 解封装 + VideoDecoder 解码单帧）——纯解码 API 不进渲染管线，
+ *      页面黑屏/锁屏/最小化时照常工作，且不依赖 video 元素的加载时序；
+ *   2. WebCodecs 不可用（老浏览器/编码不支持）时回退 <video> 元素方案（仅页面可见时有效）；
+ *   3. 页面不可见且 WebCodecs 不可用 → 直接抛错（上层降级为系统推荐封面）。
+ */
+export async function captureFrameSmart(file, onLog) {
+  const hasWebCodecs = typeof window !== 'undefined' &&
+    'VideoDecoder' in window && 'EncodedVideoChunk' in window && typeof OffscreenCanvas !== 'undefined'
+  if (hasWebCodecs) {
+    try {
+      const blob = await captureFrameWithWebCodecs(file)
+      onLog('（截帧方式: WebCodecs 解码，页面可见性无影响）')
+      return blob
+    } catch (err) {
+      onLog(`提示: WebCodecs 截帧不可用(${err.message})，回退 video 元素方案`)
+    }
+  } else {
+    onLog('提示: 当前浏览器不支持 WebCodecs，使用 video 元素截帧')
+  }
+  if (document.hidden) {
+    throw new Error('页面不可见且 WebCodecs 截帧不可用（浏览器挂起 video 元素解码）')
+  }
+  return captureFrameFromFile(file)
+}
+
 /** 设置文件到 input（浏览器原生 setter，兼容 Vue） */
 export function setFileToInput(input, file) {
   const dt = new DataTransfer()
@@ -162,25 +190,35 @@ export function waitForCoverUploaded(timeout = TIMEOUTS.coverUploaded) {
 
 /** 点击「完成」按钮并等待封面弹窗关闭 */
 export async function confirmCoverDialog(onLog) {
-  // 在当前 DOM 中找到封面弹窗（限缩小查找范围）
+  // 在当前 DOM 中找到封面弹窗（新版 bcc-dialog 由 findCoverDialog 专门识别，含 footer）
   const dialog = findCoverDialog()
   if (!dialog) {
     onLog('警告: 未检测到封面弹窗，将按全页面范围查找「完成」按钮')
   }
-  const scope = dialog || document
 
-  // 等待确认按钮出现（取代固定 1.5s，避免弹窗刚开时按钮尚未渲染）
-  // 新版「封面制作」编辑器的确认按钮文案可能不同，故按候选列表依次匹配
-  const findConfirm = (root) => {
+  // 查找确认按钮：
+  //   1. 弹窗（或全页面）范围内按候选文案匹配（normalizeText 已兼容「完 成」这类带空格文案）
+  //   2. 文案全部落空时按结构兜底：footer 内带 primary 样式的按钮，否则取末位按钮
+  //      （B站确认键通常在右下角，不依赖文案可绕开按钮文字改版）
+  const findConfirm = () => {
+    const dlg = findCoverDialog()
+    const root = dlg || document
     for (const lbl of BUTTON_LABELS.coverConfirm) {
       const b = findButtonInScope(lbl, root)
       if (b) return b
+    }
+    const footer = (dlg || document).querySelector(SELECTORS.coverDialogFooter)
+    if (footer) {
+      const btns = Array.from(footer.querySelectorAll('button, [role="button"], [class*="button"], [class*="btn"]'))
+        .filter((b) => (b.textContent || '').trim().length > 0)
+      const primary = btns.find((b) => /primary|submit|confirm|main/i.test((b.className || '').toString()))
+      const pick = primary || btns[btns.length - 1]
+      if (pick) return toClickable(pick)
     }
     return null
   }
 
   // 检查按钮是否可用（disabled / aria-disabled / is-disabled / 父级 disabled）
-  // 提升到函数顶层：主路径与 fallback 分支共用
   const isBtnEnabled = (btn) => {
     if (btn.disabled) return false
     if (btn.getAttribute('aria-disabled') === 'true') return false
@@ -192,7 +230,6 @@ export async function confirmCoverDialog(onLog) {
   }
 
   // 验证弹窗是否真的关闭了（移除 DOM / display:none / visibility:hidden / opacity:0 均视为关闭）
-  // 提升到函数顶层：主路径与 fallback 分支共用
   const isDialogGone = (el) => {
     if (!el || !document.body.contains(el)) return true
     const style = el.style
@@ -202,103 +239,57 @@ export async function confirmCoverDialog(onLog) {
     return false
   }
 
-  // 主路径：动态查询弹窗（Vue 重渲染会替换节点，固定引用会失效导致找不到按钮）
-  const doneBtn = await waitFor(() => findConfirm(findCoverDialog() || document), TIMEOUTS.coverConfirmBtn)
-  if (doneBtn) {
-    // 等待按钮变为可用（B站在上传/裁剪未完成时会 disable 按钮）
-    const enabled = await waitFor(() => isBtnEnabled(doneBtn) ? doneBtn : null, TIMEOUTS.coverConfirmEnabled)
-    if (!enabled) {
-      onLog('警告: 「完成」按钮 10s 后仍为禁用状态，强制点击')
+  // 新版编辑器关闭信号：封面制作 header 不可见（bcc-dialog 容器可能常驻 DOM，不能只看容器本身）
+  const isEditorHeadGone = () => {
+    for (const h of document.querySelectorAll(SELECTORS.coverEditorHead)) {
+      const rect = h.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) return false
     }
-    // 使用 dispatchEvent（B站是 Vue 页面，click() 可能不触发 Vue 绑定）
-    const rect = doneBtn.getBoundingClientRect()
-    doneBtn.dispatchEvent(new MouseEvent('click', {
-      bubbles: true, cancelable: true, view: window,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2
-    }))
-    onLog('封面设置完成')
+    return true
+  }
 
-    if (dialog) {
-      await new Promise((resolve) => {
-        let tries = 0
-        const check = () => {
-          tries++
-          if (isDialogGone(dialog) || tries > TIMEOUTS.dialogGoneMaxTries) resolve()
-          else setTimeout(check, TIMEOUTS.dialogGoneInterval)
-        }
-        check()
-      })
-      if (!isDialogGone(dialog)) {
-        onLog('警告: 封面弹窗似乎未关闭，将重试...')
-        await sleep(500)
-        // 重试：动态查询当前弹窗（Vue 可能已替换节点）
-        const currentDialog = findCoverDialog() || dialog
-        const retryBtn = findConfirm(currentDialog)
-        if (retryBtn) {
-          const r = retryBtn.getBoundingClientRect()
-          retryBtn.dispatchEvent(new MouseEvent('click', {
-            bubbles: true, cancelable: true, view: window,
-            clientX: r.left + r.width / 2, clientY: r.top + r.height / 2
-          }))
-          await sleep(1000)
-        }
-        // 重试后仍未关闭：封面确认失败，中止该视频（错误包由上层 catch 生成）
-        if (!isDialogGone(currentDialog)) {
-          throw new Error('封面弹窗重试后仍未关闭（已中止该视频，请手动设置封面）')
-        }
-      }
-    }
-  } else {
+  const isCoverDialogClosed = () => {
+    const cur = findCoverDialog()
+    if (!cur) return true
+    return isDialogGone(cur) || isEditorHeadGone()
+  }
+
+  // 等待确认按钮出现（新版编辑器要等封面处理完才渲染按钮）
+  let btn = await waitFor(findConfirm, TIMEOUTS.coverConfirmBtn)
+  if (!btn) {
     onLog('提示: 未找到完成按钮')
-    // 备用方案：优先在（重新定位的）封面弹窗内查找，再全页面查找（避免点到页面其他无关「完成」）
-    const dialogNow = findCoverDialog()
-    let fallback = null
-    for (const lbl of BUTTON_LABELS.coverConfirm) {
-      fallback = (dialogNow ? findButtonInScope(lbl, dialogNow) : null) || findButtonByText(lbl)
-      if (fallback) break
-    }
-    if (fallback) {
-      // 记录点击目标，便于失败时定位（B站文案变化时能看出点到了什么）
-      const fbText = (fallback.textContent || '').trim().slice(0, 20)
-      const fbCls = typeof fallback.className === 'string' ? fallback.className.split(' ')[0] : ''
-      onLog(`（备用方案）点击「${fbText}」(${fallback.tagName}${fbCls ? '.' + fbCls : ''})`)
-      // 点击前等按钮可用（B站封面处理未完成时按钮 disabled，直接点击无效——间歇性失败主因）
-      const ready = await waitFor(() => isBtnEnabled(fallback) ? fallback : null, TIMEOUTS.coverConfirmEnabled, 500)
-      const target = ready || fallback
-      if (!ready) onLog('警告: 「完成」按钮 10s 后仍禁用，强制点击')
-      const fr = target.getBoundingClientRect()
-      target.dispatchEvent(new MouseEvent('click', {
-        bubbles: true, cancelable: true, view: window,
-        clientX: fr.left + fr.width / 2, clientY: fr.top + fr.height / 2
-      }))
-      onLog('（备用方案）封面设置完成，等待弹窗关闭...')
-      // 用 waitFor 等弹窗关闭（最多 5s），而不是固定 sleep 后单次检查
-      const cur = findCoverDialog()
-      const closed = cur ? await waitFor(() => isDialogGone(cur), 5000, 250) : true
-      if (!closed) {
-        // Vue 可能吞掉第一次点击，补点一次再等（复用完整候选文案，避免只查「完成」落空）
-        onLog('弹窗未关闭，补点一次...')
-        const again = findConfirm(findCoverDialog() || document) || findButtonByText(BUTTON_LABELS.coverConfirm[0])
-        // 补点前同样等按钮可用
-        const againReady = again ? await waitFor(() => isBtnEnabled(again) ? again : null, 5000, 500) : null
-        if (againReady) {
-          const ar = again.getBoundingClientRect()
-          again.dispatchEvent(new MouseEvent('click', {
-            bubbles: true, cancelable: true, view: window,
-            clientX: ar.left + ar.width / 2, clientY: ar.top + ar.height / 2
-          }))
-          const closed2 = await waitFor(() => isDialogGone(cur), 5000, 250)
-          if (closed2) return
-        }
-        throw new Error('封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）')
+    // 把 footer 快照打进日志：若再次失败，错误报告里能直接看到按钮区真实结构
+    const footer = document.querySelector(SELECTORS.coverDialogFooter)
+    onLog(`封面弹窗按钮区: ${footer ? footer.outerHTML.slice(0, 300).replace(/\s+/g, ' ') : '(未找到 footer)'}`)
+    throw new Error('未找到封面「完成」按钮（已中止该视频，请手动设置封面）')
+  }
+
+  // 最多 3 轮「等按钮可用 → 点击 → 等弹窗关闭」。
+  // 每轮重新定位按钮：Vue 重渲染会替换节点，旧引用点击的是已 detach 的元素（点了等于没点）
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      if (isCoverDialogClosed()) {
+        onLog('封面弹窗已关闭')
+        await sleep(500)
+        return
       }
-    } else {
-      // 完成按钮完全找不到：封面确认失败，中止该视频（错误包由上层 catch 生成）
-      throw new Error('未找到封面「完成」按钮（已中止该视频，请手动设置封面）')
+      btn = (await waitFor(findConfirm, 5000)) || btn
+    }
+    const enabled = await waitFor(() => isBtnEnabled(btn) ? btn : null, TIMEOUTS.coverConfirmEnabled, 500)
+    if (!enabled) {
+      onLog(`警告: 「完成」按钮 ${TIMEOUTS.coverConfirmEnabled / 1000}s 后仍为禁用状态，强制点击`)
+    }
+    onLog(attempt === 1 ? '已点击「完成」，等待弹窗关闭...' : `弹窗未关闭，第 ${attempt} 次点击「完成」...`)
+    // pointerdown + pointerup + click 完整序列（部分组件只监听 pointer 事件）
+    dispatchClickSequence(btn)
+    const closed = await waitFor(isCoverDialogClosed, 5000, 250)
+    if (closed) {
+      onLog('封面弹窗已关闭')
+      await sleep(500)
+      return
     }
   }
-  await sleep(500)
+  throw new Error('封面「完成」按钮点击后弹窗未关闭（已中止该视频，请手动设置封面）')
 }
 
 /**
@@ -384,18 +375,10 @@ export async function stepSetCover(file, onLog) {
   }
   onLog('封面弹窗已打开')
 
-  // ---- 3.5 页面不可见（黑屏/最小化）：跳过截帧，改用系统推荐封面 ----
-  // 浏览器会挂起后台页面的视频解码，黑屏时截帧必然超时，直接走推荐封面更稳
-  if (document.hidden) {
-    onLog('⚠️ 页面不可见（电脑黑屏或窗口最小化），浏览器挂起视频解码，跳过截帧，改用系统封面')
-    await useRecommendedCover(onLog)
-    return
-  }
-
-  // ---- 4. 截帧 ----
+  // ---- 4. 截帧（WebCodecs 优先：页面黑屏/最小化时也能解码；失败回退 video 元素方案） ----
   let frameBlob
   try {
-    frameBlob = await captureFrameFromFile(file)
+    frameBlob = await captureFrameSmart(file, onLog)
     onLog('视频截帧成功')
   } catch (err) {
     // 截帧失败：若页面此时不可见（中途黑屏），降级用系统封面；可见则中止

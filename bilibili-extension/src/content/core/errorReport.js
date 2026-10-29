@@ -40,7 +40,17 @@ export function collectDomSnapshot() {
   grab('创作声明select', SELECTORS.declarationSelect)
   grab('上传file input', 'input[type="file"]')
   const coverDialog = findCoverDialog()
-  snap['封面弹窗'] = coverDialog ? coverDialog.outerHTML.slice(0, 800) : null
+  snap['封面弹窗'] = coverDialog ? coverDialog.outerHTML.slice(0, 1200) : null
+  // 新版封面编辑器诊断：footer 按钮区结构 + 弹窗内全部按钮文案
+  // （「完成」按钮定位失败时，下次错误报告可直接看到按钮真实长什么样）
+  const coverFooter = document.querySelector(SELECTORS.coverDialogFooter)
+  snap['封面弹窗footer'] = coverFooter ? coverFooter.outerHTML.slice(0, 600) : null
+  if (coverDialog) {
+    const btnTexts = Array.from(coverDialog.querySelectorAll('button, [class*="btn"], [class*="button"], [role="button"]'))
+      .map((b) => (b.textContent || '').trim().replace(/\s+/g, ' '))
+      .filter(Boolean)
+    snap['封面弹窗按钮文案'] = btnTexts.length ? JSON.stringify(btnTexts.slice(0, 20)) : null
+  }
   const submitBtn = findButtonByText('立即投稿')
   snap['立即投稿按钮'] = submitBtn ? submitBtn.outerHTML.slice(0, 300) : null
   return snap
