@@ -1,5 +1,5 @@
 // steps/form.js - Step 2~5: 等待表单 / 填写标题 / 创作声明 / 可见范围
-import { sleep, waitForElement } from '../core/wait.js'
+import { waitFor, waitForElement, waitForStable } from '../core/wait.js'
 import { clickDropdownOption } from '../core/find.js'
 import { SELECTORS, BUTTON_LABELS, TEXT_KEYWORDS, TIMEOUTS } from '../config.js'
 
@@ -9,7 +9,8 @@ import { SELECTORS, BUTTON_LABELS, TEXT_KEYWORDS, TIMEOUTS } from '../config.js'
 export async function stepWaitForForm(onLog) {
   onLog('等待表单加载...')
   await waitForElement(SELECTORS.titleAny, TIMEOUTS.waitForForm)
-  await sleep(TIMEOUTS.afterFormLoad)
+  // 等表单渲染稳定（上限保持 2s；快时提前继续）
+  await waitForStable({ maxMs: TIMEOUTS.afterFormLoad })
   onLog('表单已加载，开始设置')
 }
 
@@ -42,11 +43,12 @@ export async function stepSetTitle(title, onLog) {
     input.dispatchEvent(new Event('change', { bubbles: true, composed: true }))
   }
   applyTitle()
-  await sleep(TIMEOUTS.afterTitleSet)
+  // 等 Vue 消化这次输入（上限仍是 300ms，正常几十毫秒就继续）
+  await waitForStable({ quietMs: 80, maxMs: TIMEOUTS.afterTitleSet, minMs: 60 })
   // 校验：编辑器可能截断或异步清空，未生效则重填一次
   if ((input.value || '').trim() !== title.trim()) {
     applyTitle()
-    await sleep(TIMEOUTS.afterTitleSet)
+    await waitForStable({ quietMs: 80, maxMs: TIMEOUTS.afterTitleSet, minMs: 60 })
   }
   if ((input.value || '').trim() !== title.trim()) {
     onLog(`警告: 标题填写后未生效（当前值: ${input.value || '(空)'}），请检查标题框是否被锁定`)
@@ -66,8 +68,13 @@ export async function stepSetDeclaration(onLog) {
     const trigger = selectEl.querySelector(SELECTORS.declarationTrigger)
     if (!trigger) return false
     trigger.click()
-    await sleep(TIMEOUTS.clickDropdownDelay)
-    return clickDropdownOption(TEXT_KEYWORDS.declarationTarget)
+    // 下拉项一渲染出来就点（原来是无条件等满 500ms 再点一次，
+    // 慢网时会漏点导致主方案失败、白跑备用方案）
+    return !!(await waitFor(
+      () => clickDropdownOption(TEXT_KEYWORDS.declarationTarget),
+      TIMEOUTS.clickDropdownDelay + 1000,
+      100
+    ))
   }
 
   // 主方案：通过"创作声明"标签文本精确定位
@@ -115,7 +122,7 @@ export async function stepSetVisibility(onLog, targetText) {
           container.click()
           onLog(`可见范围已设置为「${text}」`)
         }
-        await sleep(TIMEOUTS.visibilitySettle)
+        await waitForStable({ maxMs: TIMEOUTS.visibilitySettle })
         return
       }
     }
@@ -135,12 +142,12 @@ export async function stepSetVisibility(onLog, targetText) {
       if (clickable) {
         clickable.click()
         onLog(`可见范围已设置为「${text}」（备用方案）`)
-        await sleep(TIMEOUTS.visibilitySettle)
+        await waitForStable({ maxMs: TIMEOUTS.visibilitySettle })
         return
       }
     }
   }
 
   onLog(`提示: 未找到可见范围「${text}」，请手动设置`)
-  await sleep(TIMEOUTS.visibilitySettle)
+  await waitForStable({ maxMs: TIMEOUTS.visibilitySettle })
 }

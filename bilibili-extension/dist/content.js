@@ -1,70 +1,5 @@
 // content.js - B站投稿助手（由 src/ 构建生成，请勿直接修改本文件）
 (() => {
-  // src/content/core/wait.js
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-  async function waitFor(condition, timeout = 8e3, interval = 300) {
-    const start = Date.now();
-    for (; ; ) {
-      const res = condition();
-      if (res) return res;
-      if (Date.now() - start >= timeout) return null;
-      await sleep(interval);
-    }
-  }
-  function waitForElement(selectors, timeout = 3e4) {
-    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
-    return new Promise((resolve, reject) => {
-      for (const sel of selectorList) {
-        const el = document.querySelector(sel);
-        if (el) return resolve(el);
-      }
-      const observer = new MutationObserver(() => {
-        for (const sel of selectorList) {
-          const el = document.querySelector(sel);
-          if (el) {
-            observer.disconnect();
-            return resolve(el);
-          }
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(`等待元素超时`));
-      }, timeout);
-    });
-  }
-  function waitForElementByText(keyword, timeout = 6e4) {
-    const check = () => {
-      for (const el of document.querySelectorAll("*")) {
-        const text = el.textContent || "";
-        if (text.includes(keyword) && text.length < 200) {
-          const rect = el.getBoundingClientRect();
-          if (rect.width > 100 && rect.height > 30) return el;
-        }
-      }
-      return null;
-    };
-    const existing = check();
-    if (existing) return Promise.resolve(existing);
-    return new Promise((resolve, reject) => {
-      const obs = new MutationObserver(() => {
-        const el = check();
-        if (el) {
-          obs.disconnect();
-          resolve(el);
-        }
-      });
-      obs.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        obs.disconnect();
-        reject(new Error(`等待「${keyword}」超时`));
-      }, timeout);
-    });
-  }
-
   // src/content/config.js
   var SELECTORS = {
     // 标题输入框（主稿件标题）
@@ -201,31 +136,71 @@
     }
     return null;
   }
-  function findButtonByText(text) {
-    const all = document.querySelectorAll("*");
-    let bestMatch = null;
-    for (const el of all) {
-      const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-      if (normalizeText(directText) === normalizeText(text)) {
-        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-          bestMatch = el;
-        }
-      }
+  function directTextOf(el) {
+    let s = "";
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) s += n.nodeValue;
     }
-    return bestMatch ? toClickable(bestMatch) : null;
+    return s.trim();
+  }
+  function findExactTextElement(text, root) {
+    const target = normalizeText(text);
+    if (!target) return null;
+    const scope = root || document.body;
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null);
+    let bestMatch = null;
+    let node;
+    while (node = walker.nextNode()) {
+      const raw = node.nodeValue;
+      if (!raw || !raw.trim()) continue;
+      if (!raw.includes(target) && !normalizeText(raw).includes(target)) continue;
+      const el = node.parentElement;
+      if (!el || el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel")) continue;
+      if (normalizeText(directTextOf(el)) !== target) continue;
+      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) bestMatch = el;
+    }
+    return bestMatch;
+  }
+  function findButtonByText(text) {
+    const el = findExactTextElement(text, document.body);
+    return el ? toClickable(el) : null;
   }
   function findButtonInScope(text, scope) {
-    const all = scope.querySelectorAll("*");
-    let bestMatch = null;
-    for (const el of all) {
-      const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-      if (normalizeText(directText) === normalizeText(text)) {
-        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-          bestMatch = el;
+    const el = findExactTextElement(text, scope);
+    return el ? toClickable(el) : null;
+  }
+  function findVisibleTextElement(keyword, opts = {}) {
+    const {
+      maxTextLen = 200,
+      minWidth = 100,
+      minHeight = 30,
+      maxCandidates = 30,
+      maxDepth = 10
+    } = opts;
+    if (!keyword) return null;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    const candidates = [];
+    let node;
+    let seen = 0;
+    while ((node = walker.nextNode()) && seen < maxCandidates) {
+      const raw = node.nodeValue;
+      if (!raw || raw.indexOf(keyword) === -1) continue;
+      let el = node.parentElement;
+      if (!el || el.closest && el.closest("#bili-helper-panel")) continue;
+      seen++;
+      for (let depth = 0; el && el !== document.body && depth < maxDepth; depth++) {
+        if ((el.textContent || "").length > maxTextLen) break;
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= minWidth && rect.height >= minHeight) {
+          candidates.push({ el, area: rect.width * rect.height });
+          break;
         }
+        el = el.parentElement;
       }
     }
-    return bestMatch ? toClickable(bestMatch) : null;
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => a.area - b.area);
+    return candidates[0].el;
   }
   function toClickable(el) {
     let cur = el;
@@ -356,6 +331,94 @@
       }
     }
     return null;
+  }
+
+  // src/content/core/wait.js
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  function waitForStable({ quietMs = 150, maxMs = 2e3, minMs = 100 } = {}) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      let lastChange = start;
+      let done = false;
+      let timer = null;
+      let tick = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        obs.disconnect();
+        clearTimeout(timer);
+        clearInterval(tick);
+        resolve();
+      };
+      const obs = new MutationObserver(() => {
+        lastChange = Date.now();
+      });
+      try {
+        obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+      } catch (e) {
+        setTimeout(finish, minMs);
+        return;
+      }
+      timer = setTimeout(finish, maxMs);
+      tick = setInterval(() => {
+        const now = Date.now();
+        if (now - start < minMs) return;
+        if (now - lastChange >= quietMs) finish();
+      }, 50);
+    });
+  }
+  async function waitFor(condition, timeout = 8e3, interval = 300) {
+    const start = Date.now();
+    for (; ; ) {
+      const res = condition();
+      if (res) return res;
+      if (Date.now() - start >= timeout) return null;
+      await sleep(interval);
+    }
+  }
+  function waitForElement(selectors, timeout = 3e4) {
+    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
+    return new Promise((resolve, reject) => {
+      for (const sel of selectorList) {
+        const el = document.querySelector(sel);
+        if (el) return resolve(el);
+      }
+      const observer = new MutationObserver(() => {
+        for (const sel of selectorList) {
+          const el = document.querySelector(sel);
+          if (el) {
+            observer.disconnect();
+            return resolve(el);
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`等待元素超时`));
+      }, timeout);
+    });
+  }
+  function waitForElementByText(keyword, timeout = 6e4) {
+    const check = () => findVisibleTextElement(keyword);
+    const existing = check();
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const obs = new MutationObserver(() => {
+        const el = check();
+        if (el) {
+          obs.disconnect();
+          resolve(el);
+        }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        obs.disconnect();
+        reject(new Error(`等待「${keyword}」超时`));
+      }, timeout);
+    });
   }
 
   // src/content/core/title.js
@@ -512,7 +575,7 @@
   async function stepWaitForForm(onLog) {
     onLog("等待表单加载...");
     await waitForElement(SELECTORS.titleAny, TIMEOUTS.waitForForm);
-    await sleep(TIMEOUTS.afterFormLoad);
+    await waitForStable({ maxMs: TIMEOUTS.afterFormLoad });
     onLog("表单已加载，开始设置");
   }
   async function stepSetTitle(title, onLog) {
@@ -539,10 +602,10 @@
       input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
     };
     applyTitle();
-    await sleep(TIMEOUTS.afterTitleSet);
+    await waitForStable({ quietMs: 80, maxMs: TIMEOUTS.afterTitleSet, minMs: 60 });
     if ((input.value || "").trim() !== title.trim()) {
       applyTitle();
-      await sleep(TIMEOUTS.afterTitleSet);
+      await waitForStable({ quietMs: 80, maxMs: TIMEOUTS.afterTitleSet, minMs: 60 });
     }
     if ((input.value || "").trim() !== title.trim()) {
       onLog(`警告: 标题填写后未生效（当前值: ${input.value || "(空)"}），请检查标题框是否被锁定`);
@@ -556,8 +619,11 @@
       const trigger = selectEl.querySelector(SELECTORS.declarationTrigger);
       if (!trigger) return false;
       trigger.click();
-      await sleep(TIMEOUTS.clickDropdownDelay);
-      return clickDropdownOption(TEXT_KEYWORDS.declarationTarget);
+      return !!await waitFor(
+        () => clickDropdownOption(TEXT_KEYWORDS.declarationTarget),
+        TIMEOUTS.clickDropdownDelay + 1e3,
+        100
+      );
     }
     for (const label of document.querySelectorAll("span, label, div")) {
       if (label.textContent.trim() === TEXT_KEYWORDS.declarationLabel) {
@@ -592,7 +658,7 @@
             container.click();
             onLog(`可见范围已设置为「${text}」`);
           }
-          await sleep(TIMEOUTS.visibilitySettle);
+          await waitForStable({ maxMs: TIMEOUTS.visibilitySettle });
           return;
         }
       }
@@ -606,13 +672,13 @@
         if (clickable) {
           clickable.click();
           onLog(`可见范围已设置为「${text}」（备用方案）`);
-          await sleep(TIMEOUTS.visibilitySettle);
+          await waitForStable({ maxMs: TIMEOUTS.visibilitySettle });
           return;
         }
       }
     }
     onLog(`提示: 未找到可见范围「${text}」，请手动设置`);
-    await sleep(TIMEOUTS.visibilitySettle);
+    await waitForStable({ maxMs: TIMEOUTS.visibilitySettle });
   }
 
   // src/content/core/mp4.js
@@ -1198,7 +1264,7 @@
       if (attempt > 1) {
         if (isCoverDialogClosed()) {
           onLog("封面弹窗已关闭");
-          await sleep(500);
+          await waitForStable({ maxMs: 500 });
           return;
         }
         btn = await waitFor(findConfirm, 5e3) || btn;
@@ -1212,7 +1278,7 @@
       const closed = await waitFor(isCoverDialogClosed, 5e3, 250);
       if (closed) {
         onLog("封面弹窗已关闭");
-        await sleep(500);
+        await waitForStable({ maxMs: 500 });
         return;
       }
     }
@@ -1230,11 +1296,11 @@
     }
     if (!coverBtn) {
       onLog("尝试通过页面结构定位封面区域...");
-      for (const el of document.querySelectorAll("*")) {
-        const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-        if (!BUTTON_LABELS.coverFallbackEntry.includes(directText)) continue;
-        const parent = el.closest(".el-form-item") || el.parentElement;
-        if (!parent) break;
+      for (const label of BUTTON_LABELS.coverFallbackEntry) {
+        const labelEl = findExactTextElement(label);
+        if (!labelEl) continue;
+        const parent = labelEl.closest(".el-form-item") || labelEl.parentElement;
+        if (!parent) continue;
         coverBtn = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]');
         if (coverBtn) break;
         for (const item of parent.querySelectorAll("*")) {
@@ -1554,22 +1620,9 @@
           const titleKeyword = file.name.replace(/\.mp4$/i, "");
           await waitForElementByText(titleKeyword, TIMEOUTS.waitForFormEditor);
           onLog("视频卡片已出现在队列中");
-          await sleep(TIMEOUTS.afterCardAppear);
+          await waitForStable({ maxMs: TIMEOUTS.afterCardAppear });
           onLog("点击视频卡片...");
-          let bestEl = null, bestSize = Infinity;
-          for (const el of document.querySelectorAll("*")) {
-            const text = el.textContent || "";
-            if (text.includes(titleKeyword) && text.length < 200) {
-              const rect = el.getBoundingClientRect();
-              if (rect.width > 100 && rect.height > 30) {
-                const size = rect.width * rect.height;
-                if (size < bestSize) {
-                  bestSize = size;
-                  bestEl = el;
-                }
-              }
-            }
-          }
+          const bestEl = findVisibleTextElement(titleKeyword);
           if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`);
           const clickable = toClickable(bestEl);
           if (clickable && clickable !== bestEl) {
@@ -1588,7 +1641,7 @@
           onLog("已点击视频卡片");
           onLog("等待编辑页面加载...");
           await waitForElement(SELECTORS.titleAny.slice(0, 2), TIMEOUTS.waitForFormEditor);
-          await sleep(TIMEOUTS.afterFormLoad);
+          await waitForStable({ maxMs: TIMEOUTS.afterFormLoad });
           onLog("已进入编辑页面");
           await runStep("stepWaitForForm", stepWaitForForm, onLog);
           await runStep("stepSetDeclaration", stepSetDeclaration, onLog);

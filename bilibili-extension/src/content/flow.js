@@ -1,6 +1,6 @@
 // flow.js - 主流程编排：uploadAndSubmit / batchUpload
-import { sleep, waitFor, waitForElement, waitForElementByText } from './core/wait.js'
-import { findButtonByText, toClickable } from './core/find.js'
+import { sleep, waitFor, waitForElement, waitForElementByText, waitForStable } from './core/wait.js'
+import { findButtonByText, findVisibleTextElement, toClickable } from './core/find.js'
 import { parseTitle } from './core/title.js'
 import { runStep, recordError, setCurrentStep } from './core/errorReport.js'
 import { stepUploadFile } from './steps/upload.js'
@@ -126,21 +126,12 @@ export async function batchUpload(files, onLog, targetText) {
         const titleKeyword = file.name.replace(/\.mp4$/i, '')
         await waitForElementByText(titleKeyword, TIMEOUTS.waitForFormEditor)
         onLog('视频卡片已出现在队列中')
-        await sleep(TIMEOUTS.afterCardAppear)
+        // 等卡片渲染稳定（上限保持 2s；页面快时通常 150~300ms 就继续）
+        await waitForStable({ maxMs: TIMEOUTS.afterCardAppear })
 
         // 点击视频卡片进入编辑页面
         onLog('点击视频卡片...')
-        let bestEl = null, bestSize = Infinity
-        for (const el of document.querySelectorAll('*')) {
-          const text = el.textContent || ''
-          if (text.includes(titleKeyword) && text.length < 200) {
-            const rect = el.getBoundingClientRect()
-            if (rect.width > 100 && rect.height > 30) {
-              const size = rect.width * rect.height
-              if (size < bestSize) { bestSize = size; bestEl = el }
-            }
-          }
-        }
+        const bestEl = findVisibleTextElement(titleKeyword)
         if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`)
 
         const clickable = toClickable(bestEl)
@@ -160,7 +151,8 @@ export async function batchUpload(files, onLog, targetText) {
         // 等待编辑页面加载
         onLog('等待编辑页面加载...')
         await waitForElement(SELECTORS.titleAny.slice(0, 2), TIMEOUTS.waitForFormEditor)
-        await sleep(TIMEOUTS.afterFormLoad)
+        // 等编辑页渲染稳定（上限保持 2s）
+        await waitForStable({ maxMs: TIMEOUTS.afterFormLoad })
         onLog('已进入编辑页面')
 
         // 填表

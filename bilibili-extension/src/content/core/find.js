@@ -16,44 +16,104 @@ export function findFileInput() {
   return null
 }
 
+/** 元素自身的直接文本（不含子元素文本） */
+function directTextOf(el) {
+  let s = ''
+  for (const n of el.childNodes) {
+    if (n.nodeType === 3) s += n.nodeValue
+  }
+  return s.trim()
+}
+
+/**
+ * 按「直接文本」精确查找元素：只扫文本节点（TreeWalker），不再全页遍历元素。
+ * 性能要点：旧实现 querySelectorAll('*') + 每元素建一次 childNodes 数组，
+ * 在投稿页上万节点时要几毫秒到几十毫秒；而 findButtonByText 被轮询高频调用
+ * （submit/封面确认都是每 300~1000ms 一次），会持续抢占主线程拖慢整个流程。
+ * TreeWalker 只读 nodeValue，代价与文本节点数成正比。
+ * @param {string} text 目标文案（比较前统一去空白）
+ * @param {Element|Document} [root=document.body] 查找范围
+ * @returns {Element|null} 匹配到的最小元素（未转可点击父元素）
+ */
+export function findExactTextElement(text, root) {
+  const target = normalizeText(text)
+  if (!target) return null
+  const scope = root || document.body
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null)
+  let bestMatch = null
+  let node
+  while ((node = walker.nextNode())) {
+    const raw = node.nodeValue
+    if (!raw || !raw.trim()) continue
+    // 先做最便宜的原始包含判断（命中即必然归一化命中），
+    // 只有原始文本不包含时才做归一化——避免给每个文本节点都分配新字符串
+    if (!raw.includes(target) && !normalizeText(raw).includes(target)) continue
+    const el = node.parentElement
+    if (!el || el.id === 'bili-helper-panel' || (el.closest && el.closest('#bili-helper-panel'))) continue
+    // 用元素级拼接结果二次校验：兼容「确 定」被拆成多个文本节点的情况
+    if (normalizeText(directTextOf(el)) !== target) continue
+    if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) bestMatch = el
+  }
+  return bestMatch
+}
+
 /** 通过文本内容查找可点击元素 */
 export function findButtonByText(text) {
-  const all = document.querySelectorAll('*')
-
-  // 第一轮：找直接文本节点匹配的最小元素，然后向上找可点击父元素
-  let bestMatch = null
-  for (const el of all) {
-    const directText = Array.from(el.childNodes)
-      .filter(n => n.nodeType === 3)
-      .map(n => n.textContent)
-      .join('')
-      .trim()
-    if (normalizeText(directText) === normalizeText(text)) {
-      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-        bestMatch = el
-      }
-    }
-  }
-  return bestMatch ? toClickable(bestMatch) : null
+  const el = findExactTextElement(text, document.body)
+  return el ? toClickable(el) : null
 }
 
 /** 在指定 scope 内按直接文本节点查找可点击元素 */
 export function findButtonInScope(text, scope) {
-  const all = scope.querySelectorAll('*')
-  let bestMatch = null
-  for (const el of all) {
-    const directText = Array.from(el.childNodes)
-      .filter(n => n.nodeType === 3)
-      .map(n => n.textContent)
-      .join('')
-      .trim()
-    if (normalizeText(directText) === normalizeText(text)) {
-      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-        bestMatch = el
+  const el = findExactTextElement(text, scope)
+  return el ? toClickable(el) : null
+}
+
+/**
+ * 查找「包含指定关键词、且尺寸像卡片/区块」的最内层可见元素。
+ * 用于等视频卡片出现、找封面入口这类"按关键词找块"的场景。
+ * 性能要点：从文本节点入手（TreeWalker）而不是全页 querySelectorAll('*')，
+ * 且 getBoundingClientRect（会强制同步布局）只对少量候选调用。
+ * @param {string} keyword 关键词（原始包含匹配，不归一化，供文件名/分区名等使用）
+ * @param {object} [opts]
+ * @param {number} [opts.maxTextLen=200] 候选元素文本长度上限（排除大容器）
+ * @param {number} [opts.minWidth=100] 命中区域最小宽度
+ * @param {number} [opts.minHeight=30] 命中区域最小高度
+ * @param {number} [opts.maxCandidates=30] 最多考察多少个命中文本节点，防极端页面拖死
+ * @param {number} [opts.maxDepth=10] 从文本元素向上最多爬几层
+ * @returns {Element|null} 候选里面积最小（最内层）的达标元素——与原「取最小面积」语义一致
+ */
+export function findVisibleTextElement(keyword, opts = {}) {
+  const {
+    maxTextLen = 200, minWidth = 100, minHeight = 30,
+    maxCandidates = 30, maxDepth = 10,
+  } = opts
+  if (!keyword) return null
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null)
+  const candidates = []
+  let node
+  let seen = 0
+  while ((node = walker.nextNode()) && seen < maxCandidates) {
+    const raw = node.nodeValue
+    if (!raw || raw.indexOf(keyword) === -1) continue
+    let el = node.parentElement
+    if (!el || (el.closest && el.closest('#bili-helper-panel'))) continue
+    seen++
+    // 从文本所在元素向上，取第一个「文本量像卡片、尺寸达标」的容器
+    for (let depth = 0; el && el !== document.body && depth < maxDepth; depth++) {
+      if ((el.textContent || '').length > maxTextLen) break // 已到外层大容器，本候选无解
+      const rect = el.getBoundingClientRect()
+      if (rect.width >= minWidth && rect.height >= minHeight) {
+        candidates.push({ el, area: rect.width * rect.height })
+        break
       }
+      el = el.parentElement
     }
   }
-  return bestMatch ? toClickable(bestMatch) : null
+  if (!candidates.length) return null
+  // 与旧实现一致：多个候选时取面积最小的那个（最贴近"卡片内文字"的那层）
+  candidates.sort((a, b) => a.area - b.area)
+  return candidates[0].el
 }
 
 /** 从文本元素向上找到可点击的父元素 */
