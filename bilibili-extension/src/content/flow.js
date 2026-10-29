@@ -7,7 +7,34 @@ import { stepUploadFile } from './steps/upload.js'
 import { stepWaitForForm, stepSetTitle, stepSetDeclaration, stepSetVisibility } from './steps/form.js'
 import { stepSetCover } from './steps/cover.js'
 import { stepSubmit } from './steps/submit.js'
+import { runHealthCheck, renderHealthBanner } from './core/healthCheck.js'
 import { BUTTON_LABELS, SELECTORS, TIMEOUTS, VIDEO_EXTENSIONS } from './config.js'
+
+// 每批次只做一次页面结构自检（跨视频复用结果）
+let healthChecked = false
+
+/**
+ * 进入编辑页后自检关键锚点：B站改版时提前预警，而不是跑到封面那步才发现。
+ * 先等 DOM 稳定；仍有缺失再宽限 1.5s 复查一次，避免表单渲染到一半误报。
+ */
+async function checkPageHealthOnce(onLog) {
+  if (healthChecked) return
+  healthChecked = true
+  await waitForStable({ maxMs: 800 })
+  let result = runHealthCheck()
+  if (!result.ok) {
+    await sleep(1500)
+    result = runHealthCheck()
+  }
+  renderHealthBanner(result)
+  if (result.ok) {
+    onLog('页面结构自检通过')
+  } else if (result.criticalMissing.length) {
+    onLog(`⚠️ 页面结构自检失败：未找到 ${result.criticalMissing.join('、')}，B站可能已改版`)
+  } else {
+    onLog(`提示: 页面结构自检缺失 ${result.missing.join('、')}（有备用方案，可继续）`)
+  }
+}
 
 /**
  * 上传并自动投稿一个视频
@@ -23,6 +50,7 @@ export async function uploadAndSubmit(file, onLog, targetText) {
 
   // Step 2: 等待表单加载
   await runStep('stepWaitForForm', stepWaitForForm, onLog)
+  await checkPageHealthOnce(onLog)
 
   // Step 3: 填写标题
   await runStep('stepSetTitle', stepSetTitle, title, onLog)
@@ -49,6 +77,7 @@ export async function uploadAndSubmit(file, onLog, targetText) {
  */
 export async function batchUpload(files, onLog, targetText) {
   onLog('提示: 投稿期间请保持本页面可见，最小化窗口会导致浏览器节流、提交可能卡住')
+  healthChecked = false // 每批次重新自检一次
   for (let i = 0; i < files.length; i++) {
     const file = files[i]
     // 重置当前步骤标记：批次内非 runStep 错误（如找不到按钮）也能定位到具体第几个

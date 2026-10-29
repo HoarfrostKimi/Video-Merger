@@ -153,7 +153,7 @@
     while (node = walker.nextNode()) {
       const raw = node.nodeValue;
       if (!raw || !raw.trim()) continue;
-      if (!raw.includes(target) && !normalizeText(raw).includes(target)) continue;
+      if (!raw.includes(target) && raw.trim().length > target.length + 8) continue;
       const el = node.parentElement;
       if (!el || el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel")) continue;
       if (normalizeText(directTextOf(el)) !== target) continue;
@@ -251,6 +251,17 @@
     }
     return false;
   }
+  function isVisibleInTree(el, maxDepth = 12) {
+    let node = el;
+    let depth = 0;
+    while (node && node !== document.body && depth < maxDepth) {
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      node = node.parentElement;
+      depth++;
+    }
+    return true;
+  }
   function findCoverDialog() {
     const isSelfPanel = (el) => el && (el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel"));
     for (const head of document.querySelectorAll(SELECTORS.coverEditorHead)) {
@@ -263,13 +274,12 @@
         if (cls.includes("dialog") || cls.includes("modal")) dialogRoot = node;
         node = node.parentElement;
       }
-      if (dialogRoot) {
-        const style = window.getComputedStyle(dialogRoot);
-        if (style.display !== "none" && style.visibility !== "hidden") return dialogRoot;
-      }
+      if (dialogRoot && isVisibleInTree(dialogRoot)) return dialogRoot;
     }
-    const known = document.querySelector(SELECTORS.coverDialogKnown.join(", "));
-    if (known && !isSelfPanel(known)) return known;
+    for (const known of document.querySelectorAll(SELECTORS.coverDialogKnown.join(", "))) {
+      if (isSelfPanel(known)) continue;
+      if (isVisibleInTree(known)) return known;
+    }
     const candidates = [];
     const imgInputs = document.querySelectorAll(SELECTORS.imageFileInput);
     for (const inp of imgInputs) {
@@ -284,7 +294,7 @@
         if (isSelfPanel(el)) continue;
         const text = el.textContent || "";
         if (text.length < 500 && (TEXT_KEYWORDS.coverFeatures.some((kw) => text.includes(kw)) || text.includes("封面") && text.includes("裁剪"))) {
-          candidates.push(el);
+          if (isVisibleInTree(el)) candidates.push(el);
         }
       }
     }
@@ -293,7 +303,7 @@
       for (const cvs of canvases) {
         if (isSelfPanel(cvs)) continue;
         const style = window.getComputedStyle(cvs);
-        if (style.display !== "none" && cvs.width > 100 && cvs.height > 100) {
+        if (style.display !== "none" && cvs.width > 100 && cvs.height > 100 && isVisibleInTree(cvs)) {
           candidates.push(cvs);
         }
       }
@@ -325,6 +335,7 @@
       if (style.display === "none" || style.visibility === "hidden") continue;
       const zIndex = parseInt(style.zIndex) || 0;
       if (zIndex < 50) continue;
+      if (!isVisibleInTree(ov)) continue;
       const text = ov.textContent || "";
       if (text.includes("封面") || text.includes("裁剪") || ov.querySelector('input[type="file"], canvas, img[src^="blob:"]')) {
         return ov;
@@ -1541,7 +1552,103 @@
     }
   }
 
+  // src/content/core/healthCheck.js
+  var BANNER_ID = "bili-helper-health";
+  function anyPresent(selectors) {
+    const list = Array.isArray(selectors) ? selectors : [selectors];
+    for (const sel of list) {
+      if (document.querySelector(sel)) return true;
+    }
+    return false;
+  }
+  function anyText(keyword) {
+    return (document.body?.textContent || "").includes(keyword);
+  }
+  var HEALTH_CHECKS = [
+    { id: "title", label: "标题输入框", critical: true, test: () => anyPresent(SELECTORS.titleAny) },
+    { id: "submit", label: "「立即投稿」按钮", critical: true, test: () => !!findButtonByText(BUTTON_LABELS.submit) },
+    { id: "coverEntry", label: "封面入口", critical: false, test: () => coverEntryExists() },
+    { id: "visibility", label: "可见范围选择器", critical: false, test: () => anyPresent(SELECTORS.visibilityName) },
+    {
+      id: "declaration",
+      label: "创作声明下拉",
+      critical: false,
+      test: () => anyPresent(SELECTORS.declarationSelect) || anyText(TEXT_KEYWORDS.declarationTarget)
+    }
+  ];
+  function coverEntryExists() {
+    for (const label of BUTTON_LABELS.coverEntry) {
+      if (findButtonByText(label)) return true;
+    }
+    return anyText("封面");
+  }
+  function runHealthCheck() {
+    const missing = [];
+    const criticalMissing = [];
+    for (const c of HEALTH_CHECKS) {
+      let ok = false;
+      try {
+        ok = !!c.test();
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok) {
+        missing.push(c.label);
+        if (c.critical) criticalMissing.push(c.label);
+      }
+    }
+    return { ok: missing.length === 0, missing, criticalMissing };
+  }
+  function renderHealthBanner(result) {
+    const panel = document.getElementById("bili-helper-panel");
+    if (!panel) return;
+    let banner = document.getElementById(BANNER_ID);
+    if (result.ok) {
+      if (banner) banner.remove();
+      return;
+    }
+    const isCritical = result.criticalMissing.length > 0;
+    const text = isCritical ? `页面结构异常：未找到 ${result.criticalMissing.map((s) => `「${s}」`).join("、")}。B站可能已改版，本批次大概率失败，建议先更新扩展再传。` : `提示：未找到 ${result.missing.map((s) => `「${s}」`).join("、")}（有备用方案，若流程卡住可能是B站改版）`;
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = BANNER_ID;
+      const body = panel.querySelector(".bili-helper-body") || panel;
+      body.insertBefore(banner, body.firstChild);
+    }
+    banner.style.cssText = [
+      "margin:8px 0",
+      "padding:8px 10px",
+      "border-radius:6px",
+      "font-size:12px",
+      "line-height:1.5",
+      isCritical ? "background:#fff1f0" : "background:#fffbe6",
+      isCritical ? "border:1px solid #ffa39e" : "border:1px solid #ffe58f",
+      isCritical ? "color:#a8071a" : "color:#874d00"
+    ].join(";");
+    banner.textContent = text;
+    banner.title = text;
+  }
+
   // src/content/flow.js
+  var healthChecked = false;
+  async function checkPageHealthOnce(onLog) {
+    if (healthChecked) return;
+    healthChecked = true;
+    await waitForStable({ maxMs: 800 });
+    let result = runHealthCheck();
+    if (!result.ok) {
+      await sleep(1500);
+      result = runHealthCheck();
+    }
+    renderHealthBanner(result);
+    if (result.ok) {
+      onLog("页面结构自检通过");
+    } else if (result.criticalMissing.length) {
+      onLog(`⚠️ 页面结构自检失败：未找到 ${result.criticalMissing.join("、")}，B站可能已改版`);
+    } else {
+      onLog(`提示: 页面结构自检缺失 ${result.missing.join("、")}（有备用方案，可继续）`);
+    }
+  }
   async function uploadAndSubmit(file, onLog, targetText) {
     const title = parseTitle(file.name);
     onLog(`视频: ${file.name}`);
@@ -1549,6 +1656,7 @@
     onLog("");
     await runStep("stepUploadFile", stepUploadFile, file, onLog);
     await runStep("stepWaitForForm", stepWaitForForm, onLog);
+    await checkPageHealthOnce(onLog);
     await runStep("stepSetTitle", stepSetTitle, title, onLog);
     await runStep("stepSetDeclaration", stepSetDeclaration, onLog);
     await runStep("stepSetVisibility", stepSetVisibility, onLog, targetText);
@@ -1560,6 +1668,7 @@
   }
   async function batchUpload(files, onLog, targetText) {
     onLog("提示: 投稿期间请保持本页面可见，最小化窗口会导致浏览器节流、提交可能卡住");
+    healthChecked = false;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       setCurrentStep({ name: `batchUpload-第${i + 1}个`, source: "" });

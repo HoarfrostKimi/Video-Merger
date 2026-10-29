@@ -46,8 +46,10 @@ export function findExactTextElement(text, root) {
     const raw = node.nodeValue
     if (!raw || !raw.trim()) continue
     // 先做最便宜的原始包含判断（命中即必然归一化命中），
-    // 只有原始文本不包含时才做归一化——避免给每个文本节点都分配新字符串
-    if (!raw.includes(target) && !normalizeText(raw).includes(target)) continue
+    // 只有原始文本既不包含目标、又明显长于目标时才跳过——留出「目标文案被拆成
+    // 多个文本节点」的余地（如 <button>立<span></span>即投稿</button>），
+    // 同时避免给页面上的长段落逐个分配归一化字符串
+    if (!raw.includes(target) && raw.trim().length > target.length + 8) continue
     const el = node.parentElement
     if (!el || el.id === 'bili-helper-panel' || (el.closest && el.closest('#bili-helper-panel'))) continue
     // 用元素级拼接结果二次校验：兼容「确 定」被拆成多个文本节点的情况
@@ -182,6 +184,32 @@ export function clickDropdownOption(text) {
  *   2. 若失败，查找含封面上传特征（image file input / "上传封面" / "拖拽图片"）的弹窗容器
  * @returns {Element|null}
  */
+/**
+ * 元素（含祖先链）是否真的可见。
+ *
+ * 必须查祖先：computed display 不会从父级继承 'none'，所以 bcc-dialog 常驻 DOM 且
+ * 被 display:none 隐藏时，里面 .bcc-dialog__header 的 computed display 仍是 'block'。
+ * 只查元素自身会把「已关闭的封面编辑器」当成开着的弹窗返回 —— 表现为
+ * 「点了完成、弹窗却一直显示未关闭」，是封面步骤间歇失败的根源之一。
+ * @param {Element} el
+ * @param {number} [maxDepth=12] 上溯层数上限（防止极端嵌套拖慢轮询）
+ */
+export function isVisibleInTree(el, maxDepth = 12) {
+  let node = el
+  let depth = 0
+  while (node && node !== document.body && depth < maxDepth) {
+    const style = window.getComputedStyle(node)
+    if (style.display === 'none' || style.visibility === 'hidden') return false
+    node = node.parentElement
+    depth++
+  }
+  return true
+}
+
+/**
+ * 查找封面弹窗容器。
+ * @returns {Element|null} 含 footer 的最外层弹窗容器；没打开时返回 null
+ */
 export function findCoverDialog() {
   // 排除助手面板自身：面板是 fixed 定位、高 z-index、且内含 file input，
   // 不排除会被兜底检测误判为“封面弹窗”，导致弹窗关闭验证/按钮查找全部失效
@@ -201,15 +229,14 @@ export function findCoverDialog() {
       if (cls.includes('dialog') || cls.includes('modal')) dialogRoot = node // 持续上溯，保留最外层
       node = node.parentElement
     }
-    if (dialogRoot) {
-      const style = window.getComputedStyle(dialogRoot)
-      if (style.display !== 'none' && style.visibility !== 'hidden') return dialogRoot
-    }
+    if (dialogRoot && isVisibleInTree(dialogRoot)) return dialogRoot
   }
 
-  // 1. 已知选择器（兼容旧版）
-  const known = document.querySelector(SELECTORS.coverDialogKnown.join(', '))
-  if (known && !isSelfPanel(known)) return known
+  // 1. 已知选择器（兼容旧版）：取第一个真正可见的（常驻 DOM 的旧弹窗可能只是 display:none）
+  for (const known of document.querySelectorAll(SELECTORS.coverDialogKnown.join(', '))) {
+    if (isSelfPanel(known)) continue
+    if (isVisibleInTree(known)) return known
+  }
 
   // 2. 内容特征检测：找到封面相关的 file input 或上传提示文本，向上追溯弹窗容器
   const candidates = []
@@ -233,7 +260,8 @@ export function findCoverDialog() {
         TEXT_KEYWORDS.coverFeatures.some((kw) => text.includes(kw)) ||
         (text.includes('封面') && text.includes('裁剪'))
       )) {
-        candidates.push(el)
+        // 祖先链隐藏的（常驻 DOM 的旧弹窗）直接排除，否则会在弹窗关闭后继续被当成候选
+        if (isVisibleInTree(el)) candidates.push(el)
       }
     }
   }
@@ -244,7 +272,7 @@ export function findCoverDialog() {
     for (const cvs of canvases) {
       if (isSelfPanel(cvs)) continue
       const style = window.getComputedStyle(cvs)
-      if (style.display !== 'none' && cvs.width > 100 && cvs.height > 100) {
+      if (style.display !== 'none' && cvs.width > 100 && cvs.height > 100 && isVisibleInTree(cvs)) {
         candidates.push(cvs)
       }
     }
@@ -290,6 +318,7 @@ export function findCoverDialog() {
     if (style.display === 'none' || style.visibility === 'hidden') continue
     const zIndex = parseInt(style.zIndex) || 0
     if (zIndex < 50) continue
+    if (!isVisibleInTree(ov)) continue
     const text = ov.textContent || ''
     if (text.includes('封面') || text.includes('裁剪') || ov.querySelector('input[type="file"], canvas, img[src^="blob:"]')) {
       return ov
