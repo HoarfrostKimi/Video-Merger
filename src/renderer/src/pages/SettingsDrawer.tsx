@@ -25,6 +25,11 @@ interface DraftConfig {
   controlPort: number
   controlPassword: string
   inputFolder2: string
+  autoCleanEnabled: boolean
+  autoCleanDays: number
+  autoMergeEnabled: boolean
+  autoMergeTime: string
+  autoMergeUpload: boolean
 }
 
 type DraftAction = { type: 'init'; payload: DraftConfig } | { type: 'update'; key: keyof DraftConfig; value: unknown }
@@ -52,7 +57,12 @@ const initialDraft: DraftConfig = {
   controlEnabled: true,
   controlPort: 9820,
   inputFolder2: '',
-  controlPassword: ''
+  controlPassword: '',
+  autoCleanEnabled: true,
+  autoCleanDays: 7,
+  autoMergeEnabled: false,
+  autoMergeTime: '03:00',
+  autoMergeUpload: false
 }
 
 function SettingsDrawer({ visible, onClose, config, onSave, darkMode: _darkMode }: SettingsDrawerProps): JSX.Element {
@@ -79,7 +89,12 @@ function SettingsDrawer({ visible, onClose, config, onSave, darkMode: _darkMode 
           controlEnabled: config.controlEnabled ?? true,
           controlPort: config.controlPort ?? 9820,
           inputFolder2: config.inputFolder2 ?? '',
-          controlPassword: config.controlPassword ?? ''
+          controlPassword: config.controlPassword ?? '',
+          autoCleanEnabled: config.autoCleanEnabled ?? true,
+          autoCleanDays: config.autoCleanDays ?? 7,
+          autoMergeEnabled: config.autoMergeEnabled ?? false,
+          autoMergeTime: config.autoMergeTime ?? '03:00',
+          autoMergeUpload: config.autoMergeUpload ?? false
         }
       })
       fetchNetworkInfo()
@@ -309,6 +324,88 @@ function SettingsDrawer({ visible, onClose, config, onSave, darkMode: _darkMode 
           />
         </div>
         <Text type="secondary" style={descStyle}>关闭窗口后最小化到托盘，手机仍可远程控制</Text>
+
+        <div style={settingRowStyle}>
+          <Text style={labelStyle}>自动清理旧文件</Text>
+          <Switch
+            checked={draft.autoCleanEnabled}
+            onChange={(checked) => dispatchDraft({ type: 'update', key: 'autoCleanEnabled', value: checked })}
+            checkedChildren="开"
+            unCheckedChildren="关"
+            size="small"
+          />
+        </div>
+        <Text type="secondary" style={descStyle}>每 24 小时把过期的录制片段与合并视频移到回收站（可从回收站找回）</Text>
+
+        <div style={settingRowStyle}>
+          <Text style={labelStyle}>旧文件保留天数</Text>
+          <div style={rightStyle}>
+            <Input
+              type="number"
+              value={draft.autoCleanDays}
+              onChange={(e) => dispatchDraft({ type: 'update', key: 'autoCleanDays', value: Number(e.target.value) || 7 })}
+              style={{ width: 72 }}
+              min={1}
+              max={365}
+              step={1}
+              size="small"
+              disabled={!draft.autoCleanEnabled}
+            />
+            <Text type="secondary" style={{ fontSize: 13 }}>天</Text>
+          </div>
+        </div>
+        <Text type="secondary" style={{ ...descStyle, marginTop: -4 }}>
+          超过该天数的录制片段 / 合并视频会被自动清理（按直播时间判断）
+        </Text>
+
+        {/* ===== 定时自动合并 ===== */}
+        <Divider orientation="left" plain style={sectionTitleStyle}>
+          定时合并
+        </Divider>
+
+        <div style={settingRowStyle}>
+          <Text style={labelStyle}>定时自动合并</Text>
+          <Switch
+            checked={draft.autoMergeEnabled}
+            onChange={(checked) => dispatchDraft({ type: 'update', key: 'autoMergeEnabled', value: checked })}
+            checkedChildren="开"
+            unCheckedChildren="关"
+            size="small"
+          />
+        </div>
+        <Text type="secondary" style={descStyle}>
+          每天到设定时间自动合并「昨天」录制的场次，已合并过的会自动跳过
+        </Text>
+
+        <div style={settingRowStyle}>
+          <Text style={labelStyle}>合并时间</Text>
+          <Input
+            type="time"
+            value={draft.autoMergeTime}
+            onChange={(e) => dispatchDraft({ type: 'update', key: 'autoMergeTime', value: e.target.value || '03:00' })}
+            style={{ width: 110 }}
+            size="small"
+            disabled={!draft.autoMergeEnabled}
+          />
+        </div>
+        <Text type="secondary" style={{ ...descStyle, marginTop: -4 }}>
+          24 小时制。应用需保持运行（最小化到托盘也算）
+        </Text>
+
+        <div style={settingRowStyle}>
+          <Text style={labelStyle}>合并后自动投稿</Text>
+          <Switch
+            checked={draft.autoMergeUpload}
+            onChange={(checked) => dispatchDraft({ type: 'update', key: 'autoMergeUpload', value: checked })}
+            checkedChildren="开"
+            unCheckedChildren="关"
+            size="small"
+            disabled={!draft.autoMergeEnabled}
+          />
+        </div>
+        <Text type="secondary" style={descStyle}>
+          开启后合并完成会自动打开 B站投稿页，由插件接着上传；关闭则只合并
+        </Text>
 
         {/* ===== 远程控制 ===== */}
         <Divider orientation="left" plain style={sectionTitleStyle}>

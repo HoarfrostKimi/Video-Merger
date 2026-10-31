@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Layout, Button, Space, Tag, message, Typography, Empty, Progress, Card, Modal } from 'antd'
+import { Layout, Button, Space, Tag, message, Typography, Empty, Progress, Card } from 'antd'
 import { MergeCellsOutlined, BulbOutlined, BulbFilled, SettingOutlined, UploadOutlined } from '@ant-design/icons'
 import SettingsDrawer from './SettingsDrawer'
 import FolderToolbar from '../components/FolderToolbar'
@@ -8,6 +8,7 @@ import SubFileList from '../components/SubFileList'
 import HiddenFoldersPanel from '../components/HiddenFoldersPanel'
 import MergeActionBar from '../components/MergeActionBar'
 import UploadModal from '../components/UploadModal'
+import FileCleanupModal from '../components/FileCleanupModal'
 import { formatPercent, formatTime } from '../utils/format'
 
 const { Header, Content } = Layout
@@ -16,6 +17,11 @@ const { Title, Text } = Typography
 interface HomeProps {
   darkMode: boolean
   onToggleDarkMode: (value: boolean) => void
+}
+
+/** 判断分组是否在排除列表（兼容旧 key 格式「日期_标题」） */
+function isHiddenGroup(f: { key: string; date: string; title: string }, hiddenKeys: Set<string>): boolean {
+  return hiddenKeys.has(f.key) || hiddenKeys.has(`${f.date}_${f.title}`)
 }
 
 function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
@@ -50,6 +56,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   // 投稿弹窗状态
   const [mergedFiles, setMergedFiles] = useState<Array<{ index: number; name: string; path: string; mtime: number }>>([])
   const [showUploadModal, setShowUploadModal] = useState(false)
+  const [cleanupOpen, setCleanupOpen] = useState(false)
   const [uploadSelectedKeys, setUploadSelectedKeys] = useState<React.Key[]>([])
   const [uploading, setUploading] = useState(false)
   const [uploadElapsed, setUploadElapsed] = useState(0)
@@ -146,8 +153,8 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
           setScanning(true)
           const result: ScanResult = await window.api.scanFlvFiles(loadedInputFolder, 2.5, loadedOutputFolder || loadedInputFolder, undefined, loadedInputFolder2 || undefined)
           const hiddenSet = new Set(loadedHiddenKeys)
-          const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
-          const hidden = result.folders.filter((f) => hiddenSet.has(f.key))
+          const filtered = result.folders.filter((f) => !isHiddenGroup(f, hiddenSet))
+          const hidden = result.folders.filter((f) => isHiddenGroup(f, hiddenSet))
           setFolders(filtered)
           setHiddenFolders(hidden)
           setSelectedRowKeys([])
@@ -183,7 +190,13 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   }, [])
 
   const genMergeFileName = useCallback((folder: FolderGroup) => {
-    return `${folder.title}_${folder.date}`
+    // 输出文件名带上该场开始时间，避免同一天多场直播合并时同名覆盖
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const d = new Date(folder.startTimestamp || 0)
+    const hhmmss = Number.isNaN(d.getTime())
+      ? ''
+      : `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+    return `${folder.title}_${folder.date}${hhmmss ? '_' + hhmmss : ''}`
   }, [])
 
   const handleSelectInputFolder = useCallback(async () => {
@@ -234,9 +247,9 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
     try {
       const result: ScanResult = await window.api.scanFlvFiles(inputFolder, maxIntervalHours, outputFolder || undefined, undefined, inputFolder2 || undefined)
       const hiddenSet = new Set(hiddenFolderKeys)
-      const filtered = result.folders.filter((f) => !hiddenSet.has(f.key))
+      const filtered = result.folders.filter((f) => !isHiddenGroup(f, hiddenSet))
       // 保存被排除的完整对象用于显示
-      const hidden = result.folders.filter((f) => hiddenSet.has(f.key))
+      const hidden = result.folders.filter((f) => isHiddenGroup(f, hiddenSet))
       setFolders(filtered)
       setHiddenFolders(hidden)
       setSelectedRowKeys([])
@@ -260,6 +273,17 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       // ignore
     }
   }, [])
+
+  // 监听文件变更（手机端「清理」删除文件后同步刷新桌面端列表）
+  useEffect(() => {
+    if (!window.api) return
+    const unsubscribe = window.api.onFilesChanged(() => {
+      console.log('[Home] 收到文件变更通知，刷新分组和投稿列表')
+      handleScan()
+      loadMergedFiles()
+    })
+    return unsubscribe
+  }, [handleScan, loadMergedFiles])
 
   const handleMerge = useCallback(async () => {
     if (!window.api) return
@@ -472,7 +496,9 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
   const handleRestoreOne = useCallback((key: string) => {
     const folder = hiddenFolders.find((f) => f.key === key)
     if (!folder) return
-    const newKeys = hiddenFolderKeys.filter((k) => k !== key)
+    // 同时移除新 key 和旧 key（日期_标题），兼容升级前的排除记录
+    const legacyKey = key.replace(/_\d{6}$/, '')
+    const newKeys = hiddenFolderKeys.filter((k) => k !== key && k !== legacyKey)
     setHiddenFolderKeys(newKeys)
     setHiddenFolders((prev) => prev.filter((f) => f.key !== key))
     setFolders((prev) => [...prev, folder])
@@ -533,88 +559,6 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
       setUploading(false)
     }
   }, [])
-
-  // 删除已合并 MP4 及对应分段文件
-  const handleDeleteMergedFile = useCallback(async (fileName: string) => {
-    if (!window.api) return
-    try {
-      const result = await window.api.deleteMergedFile(fileName)
-      message.success(`已删除，同时清理了 ${result.segmentCount} 个分段文件`)
-      const list = await window.api.getMergedFiles()
-      setMergedFiles(list)
-      setUploadSelectedKeys([])
-    } catch (err: any) {
-      message.error(err.message || '删除失败')
-    }
-  }, [])
-
-  // 删除单个分组的所有文件（分段+已合并MP4），由 MergeTable 行内 Popconfirm 触发
-  const handleDeleteOneGroup = useCallback(async (folder: FolderGroup) => {
-    if (!window.api) return
-    try {
-      const groups = [{
-        key: folder.key,
-        folderName: folder.folderName,
-        date: folder.date,
-        title: folder.title,
-        files: folder.files.map((f) => ({ path: f.path }))
-      }]
-      const result = await window.api.deleteSegments(groups)
-      const parts: string[] = []
-      if (result.segmentCount > 0) parts.push(`${result.segmentCount} 个分段`)
-      if (result.mp4Count > 0) parts.push(`${result.mp4Count} 个合并视频`)
-      message.success(`已删除「${folder.folderName}」：${parts.join('、') || '无文件'}`)
-      setFolders((prev) => prev.filter((f) => f.key !== folder.key))
-      setSelectedRowKeys((prev) => prev.filter((k) => k !== folder.key))
-      if (selectedFolder?.key === folder.key) setSelectedFolder(null)
-      loadMergedFiles()
-    } catch (err: any) {
-      message.error(err.message || '删除失败')
-    }
-  }, [selectedFolder, loadMergedFiles])
-
-  // 删除未合并的分段源文件（选中分组）
-  const handleDeleteSelected = useCallback(async () => {
-    if (!window.api) return
-    if (selectedRowKeys.length === 0) {
-      message.warning('请先选择要删除的分组')
-      return
-    }
-    const toDelete = folders.filter((f) => selectedRowKeys.includes(f.key))
-    const totalFiles = toDelete.reduce((s, g) => s + g.fileCount, 0)
-    // 使用 Modal.confirm 做二次确认
-    Modal.confirm({
-      title: '确认删除',
-      content: `将删除 ${toDelete.length} 个分组共 ${totalFiles} 个分段源文件（移至回收站）`,
-      okText: '删除',
-      cancelText: '取消',
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          const groups = toDelete.map((g) => ({
-            key: g.key,
-            folderName: g.folderName,
-            date: g.date,
-            title: g.title,
-            files: g.files.map((f) => ({ path: f.path }))
-          }))
-          const result = await window.api!.deleteSegments(groups)
-          const parts: string[] = []
-          if (result.segmentCount > 0) parts.push(`${result.segmentCount} 个分段`)
-          if (result.mp4Count > 0) parts.push(`${result.mp4Count} 个合并视频`)
-          message.success(`已删除 ${result.groupCount} 个分组：${parts.join('、') || '无文件'}`)
-          // 从列表中移除
-          setFolders((prev) => prev.filter((f) => !selectedRowKeys.includes(f.key)))
-          setSelectedRowKeys([])
-          setSelectedFolder(null)
-          // 刷新已合并文件列表（可能删了 MP4）
-          loadMergedFiles()
-        } catch (err: any) {
-          message.error(err.message || '删除失败')
-        }
-      }
-    })
-  }, [selectedRowKeys, folders])
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -688,7 +632,6 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               onRowClick={handleRowClick}
               onSelectionChange={setSelectedRowKeys}
               genMergeFileName={genMergeFileName}
-              onDeleteGroup={handleDeleteOneGroup}
             />
 
             <SubFileList selectedFolder={selectedFolder} />
@@ -712,7 +655,7 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
               selectedRowKeys={selectedRowKeys}
               onMerge={handleMerge}
               onOpenDirectory={handleOpenDirectory}
-              onDeleteSelected={handleDeleteSelected}
+              onOpenCleanup={() => setCleanupOpen(true)}
             />
           </>
         )}
@@ -780,6 +723,17 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         darkMode={darkMode}
       />
 
+      {/* 清理文件面板（所有原文件 + 已合并文件，一键删除） */}
+      <FileCleanupModal
+        open={cleanupOpen}
+        onClose={() => setCleanupOpen(false)}
+        onDeleted={() => {
+          // 删除后刷新分组列表和投稿列表
+          handleScan()
+          loadMergedFiles()
+        }}
+      />
+
       {/* 投稿弹窗 */}
       <UploadModal
         visible={showUploadModal}
@@ -797,8 +751,6 @@ function Home({ darkMode, onToggleDarkMode }: HomeProps): JSX.Element {
         }}
         onSelectChange={setUploadSelectedKeys}
         onUpload={handleUpload}
-        onLoadFiles={loadMergedFiles}
-        onDelete={handleDeleteMergedFile}
       />
     </Layout>
   )

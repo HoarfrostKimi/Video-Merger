@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, NativeImage, nativeTheme } from 'electron'
-import { join, relative, dirname, extname, basename } from 'path'
+import { join, relative, dirname, extname, basename, resolve, isAbsolute } from 'path'
 import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, createReadStream, watch, renameSync, unlinkSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { createServer, Server } from 'http'
@@ -25,9 +25,21 @@ import {
   setResetUploadDoneCallback,
   setIsMainAppMergingCallback,
   setMergeLockCallbacks,
+  setFilesChangedCallback,
   applyExcludeFilter
 } from './controlServer'
 import * as mergedFiles from './mergedFiles'
+import {
+  type MergedSession,
+  parseSessionFromFilePaths,
+  upsertMergedSessions,
+  removeMergedSessionsByGroup,
+  removeMergedSessionsForDeletedMp4,
+  hasMergedSessionForGroup,
+  isSessionMerged,
+  hasLegacyMergedVideo,
+  parseMergedFileName
+} from './mergedFiles'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -214,6 +226,18 @@ interface AppConfig {
   controlEnabled?: boolean
   controlPort?: number
   hiddenFolderKeys?: string[]
+  /** 已合并的直播场次清单（精确匹配用，方案 A） */
+  mergedSessions?: MergedSession[]
+  /** 自动清理：定时把 N 天前的录制片段与合并产物移至回收站（默认开启） */
+  autoCleanEnabled?: boolean
+  /** 自动清理保留天数（默认 7 天） */
+  autoCleanDays?: number
+  /** 定时自动合并：到点自动扫描并合并所有待合并分组（默认关闭） */
+  autoMergeEnabled?: boolean
+  /** 定时自动合并时间，格式 HH:mm（24 小时制） */
+  autoMergeTime?: string
+  /** 定时合并完成后自动打开 B站投稿页（配合插件自动上传） */
+  autoMergeUpload?: boolean
 }
 
 function getConfigPath(): string {
@@ -263,6 +287,21 @@ function saveConfig(config: AppConfig): void {
 
 function invalidateConfigCache(): void {
   configCache = null
+}
+
+/** 记录一次成功合并的直播场次（方案 A：精确到某一天某主播的某一场） */
+function recordMergedSessionFromPaths(filePaths: string[]): void {
+  const session = parseSessionFromFilePaths(filePaths)
+  if (!session) return
+  const config = loadConfig()
+  const sessions = upsertMergedSessions(config.mergedSessions || [], session)
+  saveConfig({ mergedSessions: sessions })
+  // 合并成功会改变「已合并场次」判定，立即失效扫描缓存，避免旧列表残留
+  scanCache.clear()
+  console.log(
+    `[recordMergedSession] 记录已合并场次: ${session.date} ${session.title} ` +
+      `${new Date(session.startTs).toLocaleTimeString()} - ${new Date(session.endTs).toLocaleTimeString()}`
+  )
 }
 
 // ============ 配置文件监听（手机端修改配置时同步到电脑端） ============
@@ -554,6 +593,7 @@ async function performScan(
     date: string
     title: string
     lastTimestamp: number
+    startTimestamp: number
   }>
 }> {
   // 检查扫描缓存
@@ -648,6 +688,8 @@ async function performScan(
     date: string
     title: string
     lastTimestamp: number
+    /** 该场直播开始时间戳（组内最早分段文件时间），用于时间排序 */
+    startTimestamp: number
   }> = []
 
   if (files.length > 0) {
@@ -661,22 +703,35 @@ async function performScan(
       date: string
       title: string
       lastTimestamp: number
+      startTimestamp: number
     } | null = null
 
     const MAX_INTERVAL_MS = maxIntervalHours * 60 * 60 * 1000
 
+    // key/folderName 带上该场开始时间，保证同一天多场直播互不混淆（key 唯一）
+    const pad2 = (n: number): string => String(n).padStart(2, '0')
+    const makeKey = (date: string, title: string, ts: number): string => {
+      const d = new Date(ts)
+      return `${date}_${title}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`
+    }
+    const makeFolderName = (date: string, title: string, ts: number): string => {
+      const d = new Date(ts)
+      return `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())} ${title}`
+    }
+
     for (const file of files) {
       if (!currentGroup) {
         currentGroup = {
-          key: `${file.date}_${file.title}`,
-          folderName: `${file.date} ${file.title}`,
+          key: makeKey(file.date, file.title, file.timestamp),
+          folderName: makeFolderName(file.date, file.title, file.timestamp),
           folderPath: dirname(file.path),
           fileCount: 1,
           totalSize: file.size,
           files: [file],
           date: file.date,
           title: file.title,
-          lastTimestamp: file.timestamp
+          lastTimestamp: file.timestamp,
+          startTimestamp: file.timestamp
         }
       } else {
         const interval = file.timestamp - currentGroup.lastTimestamp
@@ -707,15 +762,16 @@ async function performScan(
             // 没有匹配的已有分组，先保存当前分组，再创建新分组
             groups.push(currentGroup)
             currentGroup = {
-              key: `${file.date}_${file.title}`,
-              folderName: `${file.date} ${file.title}`,
+              key: makeKey(file.date, file.title, file.timestamp),
+              folderName: makeFolderName(file.date, file.title, file.timestamp),
               folderPath: dirname(file.path),
               fileCount: 1,
               totalSize: file.size,
               files: [file],
               date: file.date,
               title: file.title,
-              lastTimestamp: file.timestamp
+              lastTimestamp: file.timestamp,
+              startTimestamp: file.timestamp
             }
           }
         }
@@ -727,7 +783,8 @@ async function performScan(
     }
   }
 
-  groups.sort((a, b) => b.fileCount - a.fileCount || b.date.localeCompare(a.date))
+  // 按直播开始时间倒序（最新直播在前），同一天多场按开始时间细分先后
+  groups.sort((a, b) => b.startTimestamp - a.startTimestamp)
 
   console.log(`[performScan] 共找到 ${files.length} 个文件，分成 ${groups.length} 组`)
   groups.forEach((g, i) => {
@@ -740,20 +797,8 @@ async function performScan(
   const nonRecordingGroups = groups.filter((g) => !isRecording(g))
 
   // 过滤掉已经合并过的分组（输出文件夹中已有对应 MP4）
-  // 优化：一次性扫描输出文件夹，构建已合并文件的 Set，避免每个分组都递归扫描
-  const hasMergedVideo = (dir: string, date: string, title: string, mergedSet: Set<string>): boolean => {
-    const dateLower = date.toLowerCase()
-    const titleLower = title.toLowerCase()
-    for (const entry of mergedSet) {
-      const entryLower = entry.toLowerCase()
-      // 旧格式：2026-07-12_95老阿姨_..._合并版.mp4 → 日期开头 + 包含标题
-      if (entryLower.startsWith(dateLower) && entryLower.includes(titleLower)) return true
-      // 新格式：95老阿姨_2026-07-12.mp4 → 标题开头 + 包含日期
-      if (entryLower.startsWith(titleLower) && entryLower.includes(dateLower)) return true
-    }
-    return false
-  }
-
+  // 方案 A：优先用「已合并场次清单」精确匹配（区分同一天的多场直播）；
+  // 仅当该 (日期,标题) 从无记录时（升级前的旧数据），回退到旧的文件名粗匹配兜底。
   // 一次性扫描输出文件夹，收集所有 MP4 文件名
   const collectMergedFiles = (dir: string, result: Set<string>): void => {
     try {
@@ -780,9 +825,19 @@ async function performScan(
   const searchDir = outputFolder || folderPath
   const mergedFilesSet = new Set<string>()
   collectMergedFiles(searchDir, mergedFilesSet)
-  
+
+  // 读取已合并场次清单（合并成功时写入）
+  const mergedSessions = loadConfig().mergedSessions || []
+
   const filteredGroups = nonRecordingGroups.filter((group) => {
-    return !hasMergedVideo(searchDir, group.date, group.title, mergedFilesSet)
+    if (hasMergedSessionForGroup(mergedSessions, group.date, group.title)) {
+      // 该主播当天已有精确场次记录 → 按时间区间精确匹配，同一主播当天其他场次不被误伤
+      const startTs = Math.min(...group.files.map((f) => (f as FileInfo).timestamp))
+      const endTs = group.lastTimestamp
+      return !isSessionMerged(mergedSessions, group.date, group.title, startTs, endTs)
+    }
+    // 升级前合并的旧数据（无场次记录）→ 保持旧行为兜底
+    return !hasLegacyMergedVideo(group.date, group.title, mergedFilesSet)
   })
 
   // 写入扫描缓存
@@ -806,6 +861,7 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
         if (existing) {
           existing.fileCount += f.fileCount; existing.totalSize += f.totalSize
           existing.files.push(...f.files)
+          existing.startTimestamp = Math.min(existing.startTimestamp, f.startTimestamp)
         } else { merged.set(f.key, { ...f }) }
       }
       result = { rootPath: folderPath, folders: Array.from(merged.values()) }
@@ -813,7 +869,10 @@ ipcMain.handle('scan:flvFiles', async (_event, folderPath: string, maxIntervalHo
     // 同步扫描结果到控制服务器（手机列表与 App 一致，包含排除列表过滤）
     const latestConfig = loadConfig()
     const hiddenKeys = new Set(latestConfig.hiddenFolderKeys || [])
-    const filteredForControl = result.folders.filter((f) => !hiddenKeys.has(f.key))
+    // 兼容旧排除 key（日期_标题）：新 key 带场次时间，旧 key 仍按日期+标题排除（等于排除当天全部场次）
+    const isHidden = (f: { key: string; date: string; title: string }): boolean =>
+      hiddenKeys.has(f.key) || hiddenKeys.has(`${f.date}_${f.title}`)
+    const filteredForControl = result.folders.filter((f) => !isHidden(f))
     updateScanResults(filteredForControl)
     return { success: true, data: result }
   } catch (error: any) {
@@ -878,6 +937,8 @@ ipcMain.handle('video:merge', async (event, filePaths: string[], outputPath: str
       mergeProgress = percent
     })
     mergeProgress = 100
+    // 合并成功，记录该场次（方案 A：区分同一天多场直播）
+    recordMergedSessionFromPaths(filePaths)
     return { success: true, data: warning }
   } catch (error: any) {
     mergeProgress = 0
@@ -992,6 +1053,15 @@ ipcMain.handle('video:batchMerge', async (_event, tasks: BatchMergeTask[], concu
     // 清理进度记录
     for (const task of tasks) {
       batchMergeProgress.delete(task.taskId)
+    }
+
+    // 合并成功，记录各场次（方案 A：精确匹配用，区分同一天多场直播）
+    const taskByKey = new Map(tasks.map((t) => [t.taskId, t]))
+    for (const r of results) {
+      if (r.success) {
+        const t = taskByKey.get(r.taskId)
+        if (t) recordMergedSessionFromPaths(t.filePaths)
+      }
     }
 
     return { success: true, data: results }
@@ -1128,33 +1198,19 @@ ipcMain.handle('mergedFiles:get', () => {
   return { success: true, data: files }
 })
 
-// 22b. 删除分组的所有文件：分段源文件 + 已合并的 MP4（移至回收站）
+// 22b. 删除分组：只删除该分组的分段源文件（移至回收站），不碰已合并的 MP4
+//      投稿列表里的合并 MP4 由「删除投稿 MP4」入口单独管理（只删 MP4）
 ipcMain.handle('segments:delete', async (_event, groups: Array<{ key: string; folderName: string; date: string; title: string; files: Array<{ path: string }> }>) => {
   try {
     if (!groups || groups.length === 0) {
       return { success: false, message: '未指定要删除的分组' }
     }
 
-    const config = loadConfig()
-    const outputFolder = config.outputFolder || ''
-
     let totalSegmentsDeleted = 0
-    let totalMp4Deleted = 0
     const deletedGroups: string[] = []
 
-    // 一次性扫描输出文件夹中的所有 MP4
-    let outputMp4s: string[] = []
-    if (outputFolder && existsSync(outputFolder)) {
-      try {
-        outputMp4s = readdirSync(outputFolder).filter((f) => f.toLowerCase().endsWith('.mp4'))
-      } catch { /* 忽略 */ }
-    }
-
     for (const group of groups) {
-      const liveDate = group.date || ''
-      const liveTitle = group.title || ''
-
-      // 1. 删除分段源文件
+      // 1. 删除该分组的分段源文件（按前端传入的精确路径逐个删，不按文件名猜）
       for (const file of group.files) {
         try {
           if (existsSync(file.path)) {
@@ -1166,39 +1222,34 @@ ipcMain.handle('segments:delete', async (_event, groups: Array<{ key: string; fo
         }
       }
 
-      // 2. 查找并删除已合并的 MP4（输出格式：{直播日期}_{标题}_{合并日期}_{时间}_合并版.mp4）
-      //    规则：日期钉死开头 + 标题片段（前后带下划线界定），且只删 _合并版.mp4 结尾 → 不误删跨日期同标题、不子串误删、不受标题特殊字符影响
-      const dateLower = (liveDate || '').toLowerCase()
-      const titleLower = (liveTitle || '').toLowerCase()
-      const titleFrag = `_${titleLower}_`
-      for (const mp4Name of outputMp4s) {
-        const mp4Lower = mp4Name.toLowerCase()
-        if (!mp4Lower.endsWith('_合并版.mp4')) continue
-        let matched = false
-        if (dateLower && titleLower && mp4Lower.startsWith(dateLower) && mp4Lower.includes(titleFrag)) matched = true
-        if (dateLower && titleLower && mp4Lower.startsWith(titleLower) && mp4Lower.includes(`_${dateLower}_`)) matched = true
-        if (matched) {
-          try {
-            await shell.trashItem(join(outputFolder, mp4Name))
-            outputMp4s = outputMp4s.filter((n) => n !== mp4Name) // 避免重复删除
-            totalMp4Deleted++
-          } catch (e) {
-            console.warn('[delete] MP4 移至回收站失败:', mp4Name, e)
-          }
+      deletedGroups.push(group.folderName)
+
+      // 2. 清理该场次的已合并记录（按时间区间精确清理，保留同一天其他场次）
+      const session = parseSessionFromFilePaths(group.files.map((f) => f.path))
+      if (session) {
+        const cfg = loadConfig()
+        const sessions = removeMergedSessionsByGroup(
+          cfg.mergedSessions || [],
+          session.date,
+          session.title,
+          session.startTs,
+          session.endTs
+        )
+        if (sessions.length !== (cfg.mergedSessions || []).length) {
+          saveConfig({ mergedSessions: sessions })
+          console.log(`[delete] 清理已合并场次记录: ${session.date} ${session.title}`)
         }
       }
-
-      deletedGroups.push(group.folderName)
     }
 
     // 使扫描缓存失效，让列表刷新
     scanCache.clear()
     mergedFiles.invalidateCache()
 
-    console.log(`[delete] 已删除 ${deletedGroups.length} 个分组，分段 ${totalSegmentsDeleted} 个 + MP4 ${totalMp4Deleted} 个`)
+    console.log(`[delete] 已删除 ${deletedGroups.length} 个分组，分段源文件 ${totalSegmentsDeleted} 个`)
     return {
       success: true,
-      data: { groupCount: deletedGroups.length, segmentCount: totalSegmentsDeleted, mp4Count: totalMp4Deleted, deletedGroups }
+      data: { groupCount: deletedGroups.length, segmentCount: totalSegmentsDeleted, mp4Count: 0, deletedGroups }
     }
   } catch (error: any) {
     console.error('[delete] 删除分组失败:', error)
@@ -1211,72 +1262,32 @@ ipcMain.handle('mergedFiles:delete', async (_event, fileName: string) => {
   try {
     const config = loadConfig()
     const outputFolder = config.outputFolder || ''
-    const inputFolder = config.inputFolder || ''
-    const inputFolder2 = config.inputFolder2 || ''
 
-    const mp4Path = join(outputFolder, fileName)
+    // 安全校验：只允许删除输出目录内的文件（防止 fileName 含 .. 逃逸删除任意路径）
+    const safeName = basename(fileName)
+    const mp4Path = join(outputFolder, safeName)
     if (!existsSync(mp4Path)) {
       return { success: false, message: '文件不存在' }
     }
 
-    // 从 MP4 文件名提取日期和标题
-    let liveDate = ''
-    let liveTitle = ''
-    let m = fileName.match(/^(.+?)_(\d{4}-\d{2}-\d{2})\.mp4$/i)
-    if (m) {
-      liveTitle = m[1]
-      liveDate = m[2]
-    } else {
-      m = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/)
-      if (m) {
-        liveDate = m[1]
-        liveTitle = m[2]
-      }
-    }
-
-    // 在输入文件夹中递归查找匹配的分段文件
-    const segmentFiles: string[] = []
-    const parseFileName = (name: string): { date: string; title: string } => {
-      const nameWithoutExt = stripVideoExtension(name).replace(/_PART\d+$/i, '')
-      const match = nameWithoutExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
-      if (match) return { date: match[1], title: match[3].trim() || '未命名' }
-      return { date: '未知日期', title: nameWithoutExt.trim() || '未命名' }
-    }
-    const findSegments = (dir: string): void => {
-      if (!dir || !existsSync(dir)) return
-      try {
-        const entries = readdirSync(dir, { withFileTypes: true })
-        for (const entry of entries) {
-          const fullPath = join(dir, entry.name)
-          if (entry.isDirectory() && !entry.name.startsWith('.')) {
-            findSegments(fullPath)
-          } else if (entry.isFile() && isVideoFile(entry.name)) {
-            const parsed = parseFileName(entry.name)
-            if (parsed.date === liveDate && parsed.title === liveTitle) {
-              segmentFiles.push(fullPath)
-            }
-          }
-        }
-      } catch { /* 跳过 */ }
-    }
-    findSegments(inputFolder)
-    if (inputFolder2 && inputFolder2 !== inputFolder) findSegments(inputFolder2)
-
-    // 移至回收站：先 MP4，再分段
+    // 删除投稿 MP4：只删 MP4 文件本身（移至回收站），不动分段源文件
+    // 分段源文件由「删除分组」入口管理，两个入口职责分离，互不误删
     await shell.trashItem(mp4Path)
-    let segDeleted = 0
-    for (const segPath of segmentFiles) {
-      try {
-        await shell.trashItem(segPath)
-        segDeleted++
-      } catch (e) {
-        console.warn('[delete] 分段文件移至回收站失败:', segPath, e)
-      }
-    }
 
     mergedFiles.invalidateCache()
-    console.log(`[delete] 已删除 MP4 + ${segDeleted} 个分段文件`)
-    return { success: true, data: { segmentCount: segDeleted } }
+    scanCache.clear()
+    // 清理对应的场次记录：分段源文件仍在，重新扫描后该场次会重新出现在分组里，可再次合并；
+    // 同一天其他场次若还有合并 MP4，保留其记录（新格式按场次精确清理，旧格式由 legacy 兜底隐藏）
+    {
+      const cfg = loadConfig()
+      const sessions = removeMergedSessionsForDeletedMp4(cfg.mergedSessions || [], safeName)
+      if (sessions.length !== (cfg.mergedSessions || []).length) {
+        saveConfig({ mergedSessions: sessions })
+        console.log(`[delete] 清理已合并场次记录: ${safeName}`)
+      }
+    }
+    console.log(`[delete] 已删除合并 MP4: ${fileName}`)
+    return { success: true, data: { segmentCount: 0 } }
   } catch (error: any) {
     console.error('[delete] 删除失败:', error)
     return { success: false, message: error.message || '删除失败' }
@@ -1285,13 +1296,456 @@ ipcMain.handle('mergedFiles:delete', async (_event, fileName: string) => {
 
 // 24. 已移除：投稿列表现在是输出文件夹的实时扫描，不支持从列表移除
 
+// 27. 清理文件面板：列出所有分段源文件 + 所有已合并 MP4（供一键删除）
+interface CleanupFileItem {
+  path: string
+  name: string
+  size: number
+  mtime: number
+  date: string
+  title: string
+  /** 该场直播开始时间戳（从文件名解析） */
+  timestamp?: number
+  /** 场次标识：同一场直播（含跨天）的所有分段文件相同 */
+  sessionKey?: string
+}
+
+ipcMain.handle('files:listAll', () => {
+  const config = loadConfig()
+  const inputFolders = [config.inputFolder, config.inputFolder2].filter(Boolean) as string[]
+  const outputFolder = config.outputFolder || ''
+  const segments: CleanupFileItem[] = []
+  const merged: CleanupFileItem[] = []
+
+  const parseSeg = (name: string): { date: string; title: string; timestamp: number } => {
+    const noExt = stripVideoExtension(name).replace(/_PART\d+$/i, '')
+    const match = noExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
+    if (match) {
+      const t = match[2].split('-')
+      const timestamp = new Date(`${match[1]}T${t[0]}:${t[1]}:${t[2]}`).getTime()
+      return { date: match[1], title: match[3].trim() || '未命名', timestamp: Number.isNaN(timestamp) ? 0 : timestamp }
+    }
+    return { date: '未知日期', title: noExt.trim() || '未命名', timestamp: 0 }
+  }
+
+  const scanDirForSegments = (dir: string): void => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const full = join(dir, entry.name)
+      try {
+        if (entry.isDirectory()) {
+          scanDirForSegments(full)
+        } else if (entry.isFile() && isVideoFile(entry.name)) {
+          const s = statSync(full)
+          const { date, title, timestamp } = parseSeg(entry.name)
+          segments.push({ path: full, name: entry.name, size: s.size, mtime: s.mtimeMs, date, title, timestamp })
+        }
+      } catch {
+        // 跳过无法访问的条目
+      }
+    }
+  }
+
+  for (const dir of inputFolders) scanDirForSegments(dir)
+
+  if (outputFolder && existsSync(outputFolder)) {
+    try {
+      const entries = readdirSync(outputFolder)
+      for (const name of entries) {
+        if (!name.toLowerCase().endsWith('.mp4')) continue
+        const full = join(outputFolder, name)
+        try {
+          const s = statSync(full)
+          const { date, title } = parseMergedFileName(name)
+          merged.push({ path: full, name, size: s.size, mtime: s.mtimeMs, date, title })
+        } catch {
+          // 忽略单个文件读取失败
+        }
+      }
+    } catch {
+      // 输出目录不存在
+    }
+  }
+
+  // 按场次分组：完整复用 performScan 的分组规则（同标题且间隔 ≤ maxIntervalHours 视为同一场，
+  // 支持跨天；间隔过大时回查已有分组，标题回切也能归回同一场）
+  {
+    const MAX_GAP = (config.maxIntervalHours || 2.5) * 60 * 60 * 1000
+    segments.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+    const pad2 = (n: number): string => String(n).padStart(2, '0')
+    const makeKey = (seg: CleanupFileItem): string => {
+      const d = new Date(seg.timestamp ?? 0)
+      return `${seg.date}_${seg.title}_${Number.isNaN(d.getTime()) ? '000000' : pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds())}`
+    }
+    interface SessionGroup {
+      key: string
+      title: string
+      last: number
+    }
+    let cur: SessionGroup | null = null
+    const groups: SessionGroup[] = []
+    for (const seg of segments) {
+      const ts = seg.timestamp ?? 0
+      let owner: SessionGroup
+      if (!cur) {
+        cur = { key: makeKey(seg), title: seg.title, last: ts }
+        owner = cur
+      } else if (seg.title === cur.title && ts - cur.last <= MAX_GAP) {
+        cur.last = ts
+        owner = cur
+      } else {
+        const matched = groups.find((g) => g.title === seg.title && ts - g.last <= MAX_GAP)
+        if (matched) {
+          matched.last = ts
+          owner = matched
+        } else {
+          groups.push(cur)
+          cur = { key: makeKey(seg), title: seg.title, last: ts }
+          owner = cur
+        }
+      }
+      seg.sessionKey = owner.key
+    }
+  }
+
+  // 分段按 日期倒序 + 标题 + 文件名；合并 MP4 按修改时间倒序
+  segments.sort((a, b) => b.date.localeCompare(a.date) || a.title.localeCompare(b.title) || a.name.localeCompare(b.name))
+  merged.sort((a, b) => b.mtime - a.mtime)
+
+  console.log(`[files:listAll] 分段源文件 ${segments.length} 个，已合并 MP4 ${merged.length} 个`)
+  return { success: true, data: { segments, merged } }
+})
+
+// 28. 清理文件：批量将指定文件移至回收站（分段源文件 / 已合并 MP4 均可）
+ipcMain.handle('files:delete', async (_event, paths: string[]) => {
+  try {
+    if (!paths || paths.length === 0) {
+      return { success: true, data: { deleted: 0, failed: [] } }
+    }
+
+    // 路径白名单：只允许删除输入目录或输出目录下的文件，防止越权删除任意路径
+    const cfg0 = loadConfig()
+    const allowedBases = [cfg0.inputFolder, cfg0.inputFolder2, cfg0.outputFolder].filter(Boolean) as string[]
+    const isAllowed = (p: string): boolean => {
+      if (!p) return false
+      const abs = resolve(p)
+      return allowedBases.some((base) => {
+        if (!base) return false
+        const rel = relative(resolve(base), abs)
+        return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+      })
+    }
+    const validPaths = paths.filter(isAllowed)
+    const failed: string[] = paths.filter((p) => !isAllowed(p)).concat(validPaths.filter((p) => !existsSync(p)))
+
+    let deleted = 0
+    const deletedPaths: string[] = []
+    for (const p of validPaths) {
+      try {
+        if (existsSync(p)) {
+          await shell.trashItem(p)
+          deleted++
+          deletedPaths.push(p)
+        }
+      } catch (e) {
+        console.warn('[files:delete] 移至回收站失败:', p, e)
+        failed.push(p)
+      }
+    }
+
+    // 清理已合并场次记录：只对成功删除的文件清理（避免删除失败却清除记录）
+    const cfg = loadConfig()
+    let sessions = cfg.mergedSessions || []
+    for (const p of deletedPaths) {
+      const name = basename(p)
+      if (name.toLowerCase().endsWith('.mp4')) {
+        sessions = removeMergedSessionsForDeletedMp4(sessions, name)
+      } else {
+        const s = parseSessionFromFilePaths([p])
+        if (s) sessions = removeMergedSessionsByGroup(sessions, s.date, s.title, s.startTs, s.endTs)
+      }
+    }
+    if (sessions.length !== (cfg.mergedSessions || []).length) {
+      saveConfig({ mergedSessions: sessions })
+    }
+
+    // 失效所有相关缓存
+    scanCache.clear()
+    mergedFiles.invalidateCache()
+
+    console.log(`[files:delete] 删除 ${deleted} 个文件，失败 ${failed.length} 个`)
+    return { success: true, data: { deleted, failed } }
+  } catch (error: any) {
+    console.error('[files:delete] 删除失败:', error)
+    return { success: false, message: error.message || '删除失败' }
+  }
+})
+
+// 28b. 自动清理：把超过保留天数的录制片段与合并产物移至回收站（默认开启，可在设置里关闭）
+const AUTO_CLEAN_INTERVAL_MS = 24 * 60 * 60 * 1000 // 每 24 小时检查一次
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/** 从分段文件名解析直播时间戳（与 parseSessionFromFilePaths 规则一致），解析不到返回 0 */
+function parseSegmentTimestamp(fileName: string): number {
+  const base = basename(fileName).replace(/\.(flv|m4s|blv)$/i, '').replace(/_PART\d+$/i, '')
+  const m = base.match(/^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2})-\d{3}/)
+  if (!m) return 0
+  const ts = new Date(`${m[1]}T${m[2]}:${m[3]}:${m[4]}`).getTime()
+  return Number.isNaN(ts) ? 0 : ts
+}
+
+/** 递归列出目录下指定扩展名的文件（含主播子目录），可排除某些目录（如输出目录） */
+function listVideoFiles(
+  folder: string | undefined,
+  re: RegExp,
+  opts: { depth?: number; exclude?: string[] } = {},
+): Array<{ path: string; name: string; mtime: number }> {
+  const depth = opts.depth ?? 0
+  const exclude = opts.exclude ?? []
+  const out: Array<{ path: string; name: string; mtime: number }> = []
+  if (!folder || depth > 4 || !existsSync(folder)) return out
+  try {
+    for (const f of readdirSync(folder)) {
+      const full = join(folder, f)
+      // 跳过需要排除的目录（如 outputFolder 本身，避免把合并产物当分段处理）
+      if (exclude.some((e) => e && resolve(e) === resolve(full))) continue
+      try {
+        const st = statSync(full)
+        if (st.isFile()) {
+          if (re.test(f)) out.push({ path: full, name: f, mtime: st.mtimeMs })
+        } else if (st.isDirectory()) {
+          // 分段文件在「主播名」子目录里，必须递归找
+          out.push(...listVideoFiles(full, re, { depth: depth + 1, exclude }))
+        }
+      } catch { /* 跳过读不到的项 */ }
+    }
+  } catch { /* 目录不可读 */ }
+  return out
+}
+
+/**
+ * 自动清理：把超过保留天数的分段源文件与合并 MP4 移至回收站（可恢复）。
+ * 判定时间优先用文件名里的直播时间，取不到时退回文件修改时间。
+ * 开关关闭（autoCleanEnabled === false）时不执行。
+ */
+export async function autoCleanupOldFiles(reason = 'schedule'): Promise<{ segments: number; mp4: number }> {
+  const cfg = loadConfig()
+  if (cfg.autoCleanEnabled === false) return { segments: 0, mp4: 0 }
+  const days = Math.max(1, cfg.autoCleanDays ?? 7)
+  const cutoff = Date.now() - days * DAY_MS
+
+  // 1) 分段源文件（inputFolder / inputFolder2，递归含主播子目录；排除输出目录）
+  const segments: string[] = []
+  for (const folder of [cfg.inputFolder, cfg.inputFolder2].filter(Boolean) as string[]) {
+    for (const f of listVideoFiles(folder, /\.(flv|m4s|blv)$/i, { exclude: [cfg.outputFolder || ''] })) {
+      const t = parseSegmentTimestamp(f.name) || f.mtime
+      if (t < cutoff) segments.push(f.path)
+    }
+  }
+
+  // 2) 合并产物（outputFolder）：scanFolder 返回的 mtime 即直播间时间戳（解析不到时退回文件时间）
+  const mp4s: string[] = []
+  for (const f of mergedFiles.scanFolder(cfg.outputFolder || '')) {
+    if ((f.mtime || 0) < cutoff) mp4s.push(f.path)
+  }
+
+  if (segments.length === 0 && mp4s.length === 0) {
+    console.log(`[autoCleanup] (${reason}) 无超过 ${days} 天的文件`)
+    return { segments: 0, mp4: 0 }
+  }
+
+  let nSeg = 0
+  let nMp4 = 0
+  const deletedMp4Names: string[] = []
+  for (const p of segments) {
+    try {
+      if (existsSync(p)) { await shell.trashItem(p); nSeg++ }
+    } catch (e) {
+      console.warn('[autoCleanup] 片段移至回收站失败:', p, e)
+    }
+  }
+  for (const p of mp4s) {
+    try {
+      if (existsSync(p)) { await shell.trashItem(p); nMp4++; deletedMp4Names.push(basename(p)) }
+    } catch (e) {
+      console.warn('[autoCleanup] 合并视频移至回收站失败:', p, e)
+    }
+  }
+
+  // 清理被删合并视频对应的场次记录（片段被删但 MP4 还在时保留记录）
+  if (deletedMp4Names.length) {
+    const cfg2 = loadConfig()
+    let sessions = cfg2.mergedSessions || []
+    for (const name of deletedMp4Names) sessions = removeMergedSessionsForDeletedMp4(sessions, name)
+    if (sessions.length !== (cfg2.mergedSessions || []).length) saveConfig({ mergedSessions: sessions })
+  }
+
+  scanCache.clear()
+  mergedFiles.invalidateCache()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('files:changed')
+  }
+  console.log(`[autoCleanup] (${reason}) 保留 ${days} 天：片段 ${nSeg} 个、合并视频 ${nMp4} 个 已移至回收站`)
+  return { segments: nSeg, mp4: nMp4 }
+}
+
+/** 启动自动清理：应用启动后延迟跑一次 + 每 24 小时一次（开关关闭则不跑） */
+function startAutoCleanup(): void {
+  const cfg = loadConfig()
+  if (cfg.autoCleanEnabled === false) {
+    console.log('[autoCleanup] 已在设置中关闭，跳过')
+    return
+  }
+  const days = cfg.autoCleanDays ?? 7
+  // 启动后 30 秒跑一次（避开启动高峰）
+  setTimeout(() => {
+    autoCleanupOldFiles('startup').catch((e) => console.error('[autoCleanup] 启动清理异常:', e))
+  }, 30 * 1000)
+  // 之后每 24 小时一次
+  setInterval(() => {
+    autoCleanupOldFiles('schedule').catch((e) => console.error('[autoCleanup] 定时清理异常:', e))
+  }, AUTO_CLEAN_INTERVAL_MS)
+  console.log(`[autoCleanup] 已启用：每 24 小时清理超过 ${days} 天的片段与合并视频（移至回收站）`)
+}
+
+// ============ 定时自动合并 ============
+
+/** 合并输出文件名（与渲染层 genMergeFileName 一致：标题_日期_时分秒） */
+function genAutoMergeFileName(folder: { title: string; date: string; startTimestamp: number }): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const d = new Date(folder.startTimestamp || 0)
+  const hhmmss = Number.isNaN(d.getTime())
+    ? ''
+    : `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  return `${folder.title}_${folder.date}${hhmmss ? '_' + hhmmss : ''}`
+}
+
+/** 已执行过的定时槽位，防止同一时间点重复触发 */
+let lastAutoMergeSlot = ''
+
+/**
+ * 执行一次「定时自动合并」：扫描 → 合并所有待合并场次 → 按开关决定是否投稿。
+ * 串行合并：定时任务多在夜间无人值守时跑，稳定优先。
+ * 已合并过的场次（精确到时间区间）和用户排除的分组都会自动跳过。
+ */
+async function runAutoMerge(): Promise<void> {
+  const cfg = loadConfig()
+  if (!cfg.autoMergeEnabled) return
+  if (!cfg.inputFolder || !cfg.outputFolder) {
+    console.log('[autoMerge] 未配置输入/输出文件夹，跳过')
+    return
+  }
+  if (isMerging) {
+    console.log('[autoMerge] 当前正在合并，跳过本次')
+    return
+  }
+
+  console.log('[autoMerge] ===== 开始定时合并 =====')
+  const scan = await performScan(cfg.inputFolder, cfg.maxIntervalHours || 2.5, cfg.outputFolder, true)
+  const hidden = new Set(cfg.hiddenFolderKeys || [])
+  const sessions = cfg.mergedSessions || []
+
+  // 只合并「昨天」的场次：定时任务多在凌晨跑，今天还在录的分组不能动，
+  // 更早的日期也不碰（可能是漏跑或用户特意保留的）
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  const nowD = new Date()
+  nowD.setDate(nowD.getDate() - 1)
+  const yesterday = `${nowD.getFullYear()}-${pad2(nowD.getMonth() + 1)}-${pad2(nowD.getDate())}`
+
+  const pending = scan.folders.filter((f) => {
+    if (f.date !== yesterday) return false
+    if (hidden.has(f.key) || hidden.has(`${f.date}_${f.title}`)) return false
+    return !isSessionMerged(sessions, f.date, f.title, f.startTimestamp, f.lastTimestamp)
+  })
+
+  if (!pending.length) {
+    console.log(`[autoMerge] 没有待合并的场次（仅处理昨天 ${yesterday}）`)
+    return
+  }
+  console.log(`[autoMerge] 发现 ${pending.length} 个待合并场次（昨天 ${yesterday}）`)
+
+  isMerging = true
+  const mergedPaths: string[] = []
+  try {
+    for (const f of pending) {
+      const name = genAutoMergeFileName(f)
+      const outPath = join(cfg.outputFolder, name + '.mp4')
+      if (existsSync(outPath)) {
+        console.log(`[autoMerge] 输出已存在，跳过: ${name}.mp4`)
+        continue
+      }
+      const filePaths = f.files.map((x) => x.path)
+      try {
+        console.log(`[autoMerge] 正在合并: ${name}`)
+        await mergeVideos(filePaths, outPath, () => { /* 定时任务不对外上报进度 */ })
+        recordMergedSessionFromPaths(filePaths)
+        mergedPaths.push(outPath)
+        console.log(`[autoMerge] 合并完成: ${name}`)
+      } catch (e: any) {
+        console.error(`[autoMerge] 合并失败: ${name} -`, e?.message || e)
+      }
+    }
+  } finally {
+    isMerging = false
+  }
+
+  if (!mergedPaths.length) {
+    console.log('[autoMerge] 本次没有产出新文件')
+    return
+  }
+  console.log(`[autoMerge] 本次合并完成 ${mergedPaths.length} 个文件`)
+
+  if (cfg.autoMergeUpload) {
+    try {
+      await uploadMergedFiles(mergedPaths)
+      console.log('[autoMerge] 已打开投稿页，等待插件自动上传')
+    } catch (e: any) {
+      console.error('[autoMerge] 打开投稿页失败:', e?.message || e)
+    }
+  } else {
+    console.log('[autoMerge] 未开启自动投稿，仅完成合并')
+  }
+}
+
+/**
+ * 启动定时合并调度：每 30 秒检查一次是否到达设定时间。
+ * 30 秒而非 60 秒，避免整分钟边界抖动导致错过；用槽位去重保证同一分钟只跑一次。
+ */
+function startAutoMergeTimer(): void {
+  const tick = async (): Promise<void> => {
+    try {
+      const cfg = loadConfig()
+      if (!cfg.autoMergeEnabled) return
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const hhmm = `${pad(now.getHours())}:${pad(now.getMinutes())}`
+      if ((cfg.autoMergeTime || '03:00') !== hhmm) return
+      const slot = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${hhmm}`
+      if (lastAutoMergeSlot === slot) return
+      lastAutoMergeSlot = slot
+      await runAutoMerge()
+    } catch (e: any) {
+      console.error('[autoMerge] 调度异常:', e?.message || e)
+    }
+  }
+  setInterval(() => { void tick() }, 30 * 1000)
+  console.log('[autoMerge] 定时合并调度已启动（每 30 秒检查一次）')
+}
+
 // 25. 获取网络信息（已由 18b 注册，不再重复）
 
 // 26. 投稿已合并的文件（注册文件 + 打开B站投稿页）
-ipcMain.handle('mergedFiles:upload', async (_event, filePaths: string[]) => {
-  if (!filePaths || filePaths.length === 0) {
-    return { success: false, message: '未指定文件' }
-  }
+/**
+ * 打开 B站投稿页并注册待上传文件（供 IPC 与定时任务共用）
+ * @returns 注册后的本地文件 URL 列表
+ */
+async function uploadMergedFiles(filePaths: string[]): Promise<{ fileUrls: string[] }> {
   // 重置投稿完成状态
   uploadDone = false
   if (uploadDoneTimer) { clearTimeout(uploadDoneTimer); uploadDoneTimer = null }
@@ -1304,6 +1758,14 @@ ipcMain.handle('mergedFiles:upload', async (_event, filePaths: string[]) => {
   let bilibiliUrl = 'https://member.bilibili.com/platform/upload/video/frame'
   bilibiliUrl += '?autoFiles=' + fileUrls.map((u) => encodeURIComponent(u)).join(',')
   shell.openExternal(bilibiliUrl)
+  return { fileUrls }
+}
+
+ipcMain.handle('mergedFiles:upload', async (_event, filePaths: string[]) => {
+  if (!filePaths || filePaths.length === 0) {
+    return { success: false, message: '未指定文件' }
+  }
+  const { fileUrls } = await uploadMergedFiles(filePaths)
   return { success: true, data: { fileUrls } }
 })
 
@@ -1345,9 +1807,18 @@ app.whenReady().then(() => {
     // 强制从磁盘读取最新配置（文件监听器可能漏掉外部编辑，确保手机端始终使用最新配置）
     invalidateConfigCache()
     const latestCfg = loadConfig()
-    const result = await performScan(folderPath, maxIntervalHours, latestCfg.outputFolder || '')
+    // 手机端扫描一律绕过缓存：合并/删除后「已合并场次」判定必须立即生效
+    const result = await performScan(folderPath, maxIntervalHours, latestCfg.outputFolder || '', true)
     // 返回全量列表（由调用方自行过滤排除项，用于已排除列表查询）
     return result.folders
+  })
+  // 手机端删除文件后：清主 App 扫描缓存并通知渲染层刷新列表
+  setFilesChangedCallback(() => {
+    scanCache.clear()
+    mergedFiles.invalidateCache()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('files:changed')
+    }
   })
   // 设置排除列表更新回调（手机操作排除时同步到主 App）
   setUpdateHiddenKeysCallback((keys: string[]) => {
@@ -1375,6 +1846,12 @@ app.whenReady().then(() => {
 
   // 启动配置文件监听（手机端修改配置时同步到电脑端）
   startConfigWatcher()
+
+  // 自动清理：删除 N 天前的录制片段与合并产物（移至回收站，默认开启）
+  startAutoCleanup()
+
+  // 定时自动合并：到点扫描并合并待处理场次（默认关闭）
+  startAutoMergeTimer()
 
   // 后台运行模式：创建托盘图标
   if (config.runInBackground) {

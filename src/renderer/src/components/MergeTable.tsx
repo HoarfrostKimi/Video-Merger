@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
-import { Button, Card, Input, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd'
-import { ClearOutlined, DeleteOutlined, EyeInvisibleOutlined, EyeOutlined, SearchOutlined } from '@ant-design/icons'
+import { Button, Card, Input, Select, Space, Table, Tag, Typography } from 'antd'
+import { ClearOutlined, EyeInvisibleOutlined, EyeOutlined, SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { formatSize } from '../utils/format'
 
@@ -18,7 +18,6 @@ interface MergeTableProps {
   onRowClick: (record: FolderGroup) => void
   onSelectionChange: (keys: React.Key[]) => void
   genMergeFileName: (folder: FolderGroup) => string
-  onDeleteGroup: (folder: FolderGroup) => void
 }
 
 const MergeTable: React.FC<MergeTableProps> = React.memo(({
@@ -32,11 +31,10 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
   onToggleHidden,
   onRowClick,
   onSelectionChange,
-  genMergeFileName,
-  onDeleteGroup
+  genMergeFileName
 }) => {
   const [searchText, setSearchText] = useState('')
-  const [sortBy, setSortBy] = useState<string>('date:desc')
+  const [sortBy, setSortBy] = useState<string>('time:desc')
 
   const filteredFolders = useMemo(() => {
     let list = folders
@@ -47,7 +45,8 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
     const [field, order] = sortBy.split(':')
     return [...list].sort((a, b) => {
       let cmp = 0
-      if (field === 'date') cmp = a.date.localeCompare(b.date)
+      if (field === 'time') cmp = (a.startTimestamp ?? 0) - (b.startTimestamp ?? 0)
+      else if (field === 'date') cmp = a.date.localeCompare(b.date)
       else if (field === 'title') cmp = a.title.localeCompare(b.title)
       else if (field === 'fileCount') cmp = a.fileCount - b.fileCount
       else if (field === 'totalSize') cmp = a.totalSize - b.totalSize
@@ -102,26 +101,8 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
       render: (_: string, record: FolderGroup) => {
         return <Text type="secondary">{genMergeFileName(record)}.mp4</Text>
       }
-    },
-    {
-      title: '操作',
-      key: 'action',
-      width: 70,
-      align: 'center',
-      render: (_: unknown, record: FolderGroup) => (
-        <Popconfirm
-          title="确认删除"
-          description={`将删除「${record.folderName}」的所有分段文件和已合并的 MP4（移至回收站）`}
-          onConfirm={() => onDeleteGroup(record)}
-          okText="删除"
-          cancelText="取消"
-          okButtonProps={{ danger: true }}
-        >
-          <Button type="text" danger icon={<DeleteOutlined />} size="small" />
-        </Popconfirm>
-      )
     }
-  ], [genMergeFileName, onDeleteGroup])
+  ], [genMergeFileName])
 
   return (
     <Card
@@ -150,6 +131,8 @@ const MergeTable: React.FC<MergeTableProps> = React.memo(({
             onChange={setSortBy}
             style={{ width: 130 }}
             options={[
+              { value: 'time:desc', label: '直播时间 ↓' },
+              { value: 'time:asc', label: '直播时间 ↑' },
               { value: 'date:desc', label: '日期 ↓' },
               { value: 'date:asc', label: '日期 ↑' },
               { value: 'title:asc', label: '标题 A-Z' },

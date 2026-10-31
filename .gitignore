@@ -43,3 +43,13 @@ npm-debug.log*
 # 环境变量
 .env
 .env.local
+
+# 扩展打包产物与签名私钥（私钥绝不能入库）
+bilibili-extension.crx
+bilibili-extension.pem
+
+# 工具临时文件
+.reasonix/
+reasonix.toml
+reasonix.toml.bak
+.preview-shot.png

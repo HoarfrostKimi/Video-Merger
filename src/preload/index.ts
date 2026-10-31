@@ -66,7 +66,11 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: str
   uploadMergedFiles: (filePaths: string[]) => invokeApi('mergedFiles:upload', filePaths),
   deleteMergedFile: (fileName: string) => invokeApi('mergedFiles:delete', fileName),
 
-  // 删除分组的所有文件（分段+已合并MP4）
+  // 清理文件面板
+  listAllFiles: () => invokeApi('files:listAll'),
+  deleteFiles: (paths: string[]) => invokeApi('files:delete', paths),
+
+  // 删除分组（仅分段源文件，已合并 MP4 由清理文件面板管理）
   deleteSegments: (groups: Array<{ key: string; folderName: string; date: string; title: string; files: Array<{ path: string }> }>) => invokeApi('segments:delete', groups),
 
   // 后台运行
@@ -78,6 +82,12 @@ scanFlvFiles: (folderPath: string, maxIntervalHours?: number, outputFolder?: str
   onConfigUpdated: (callback: () => void) => {
     ipcRenderer.on('config:updated', callback)
     return () => ipcRenderer.removeListener('config:updated', callback)
+  },
+
+  // 文件变更监听（手机端删除文件后同步刷新列表）
+  onFilesChanged: (callback: () => void) => {
+    ipcRenderer.on('files:changed', callback)
+    return () => ipcRenderer.removeListener('files:changed', callback)
   },
 
   // 设置原生主题（影响窗口标题栏颜色）

@@ -3,12 +3,12 @@
 
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
 import { networkInterfaces } from 'os'
-import { join, basename } from 'path'
+import { join, basename, resolve, relative, isAbsolute } from 'path'
 import { writeFileSync, createReadStream, statSync, existsSync, readdirSync } from 'fs'
 import { shell } from 'electron'
 import { mergeVideos } from './ffmpeg'
 import * as mergedFiles from './mergedFiles'
-import { invalidateCache } from './mergedFiles'
+import { invalidateCache, type MergedSession, parseSessionFromFilePaths, upsertMergedSessions, removeMergedSessionsByGroup, removeMergedSessionsForDeletedMp4, parseMergedFileName } from './mergedFiles'
 
 // ============ 类型定义 ============
 
@@ -22,6 +22,8 @@ interface VideoGroup {
   date: string
   title: string
   lastTimestamp: number
+  /** 该场直播开始时间戳（用于时间排序） */
+  startTimestamp: number
 }
 
 interface AppConfig {
@@ -35,6 +37,8 @@ interface AppConfig {
   autoCloseApp?: boolean
   controlPassword?: string
   hiddenFolderKeys?: string[]
+  /** 已合并的直播场次清单（精确匹配用，方案 A） */
+  mergedSessions?: MergedSession[]
 }
 
 // ============ 状态管理 ============
@@ -51,6 +55,10 @@ let lastGroups: VideoGroup[] = []
 let configRef: AppConfig = {}
 let saveConfigFn: ((config: AppConfig) => void) | null = null
 let loadConfigFn: (() => AppConfig) | null = null
+/** 强制失效主 App 配置缓存（确保手机端读取到磁盘最新配置） */
+let invalidateConfigCacheFn: (() => void) | null = null
+/** 文件删除后通知主 App（清扫描缓存并刷新桌面端列表） */
+let filesChangedFn: (() => void) | null = null
 let registerFileForServeFn: ((filePath: string) => Promise<string>) | null = null
 let openExternalFn: ((url: string) => void) | null = null
 // 主 App 的扫描函数回调（保证手机列表与 App 一致）
@@ -103,11 +111,20 @@ export function getLocalIP(): string {
 /** 设置配置回调 */
 export function setConfigCallbacks(
   loadConfig: () => AppConfig,
-  saveConfig: (config: AppConfig) => void
+  saveConfig: (config: AppConfig) => void,
+  invalidateConfigCache?: () => void
 ): void {
   loadConfigFn = loadConfig
   saveConfigFn = saveConfig
+  invalidateConfigCacheFn = invalidateConfigCache || null
   configRef = loadConfig()
+}
+
+/** 强制从磁盘读取最新配置（先失效主 App 配置缓存再读，避免读到陈旧值） */
+function refreshConfigFromDisk(): AppConfig {
+  if (invalidateConfigCacheFn) invalidateConfigCacheFn()
+  if (loadConfigFn) configRef = loadConfigFn()
+  return configRef
 }
 
 /** 刷新配置缓存（配置文件变更时调用） */
@@ -115,6 +132,44 @@ export function refreshConfig(): void {
   if (loadConfigFn) {
     configRef = loadConfigFn()
   }
+}
+
+/** 记录一次成功合并的直播场次（方案 A：精确到某一天某主播的某一场） */
+function recordMergedSessionFromGroup(group: VideoGroup): void {
+  const session = parseSessionFromFilePaths(group.files.map((f) => f.path))
+  if (!session) return
+  if (loadConfigFn) configRef = loadConfigFn()
+  const sessions = upsertMergedSessions(configRef.mergedSessions || [], session)
+  if (saveConfigFn) {
+    const next = { ...configRef, mergedSessions: sessions }
+    saveConfigFn(next)
+    configRef = next
+  }
+  console.log(
+    `[ControlServer] 记录已合并场次: ${session.date} ${session.title} ` +
+      `${new Date(session.startTs).toLocaleTimeString()} - ${new Date(session.endTs).toLocaleTimeString()}`
+  )
+}
+
+/** 清理某分组的已合并记录（删除分组场景：按时间区间精确清理，保留同一天其他场次） */
+function removeMergedSessionForGroup(group: { files: Array<{ path: string }> }): void {
+  const session = parseSessionFromFilePaths(group.files.map((f) => f.path))
+  if (!session) return
+  refreshConfigFromDisk()
+  const sessions = removeMergedSessionsByGroup(
+    configRef.mergedSessions || [],
+    session.date,
+    session.title,
+    session.startTs,
+    session.endTs
+  )
+  if (sessions.length === (configRef.mergedSessions || []).length) return
+  if (saveConfigFn) {
+    const next = { ...configRef, mergedSessions: sessions }
+    saveConfigFn(next)
+    configRef = next
+  }
+  console.log(`[ControlServer] 清理已合并场次记录: ${session.date} ${session.title}`)
 }
 
 /** 设置文件服务器回调 */
@@ -137,6 +192,11 @@ export function setScanCallback(
 /** 设置排除列表更新回调 */
 export function setUpdateHiddenKeysCallback(fn: (keys: string[]) => void): void {
   updateHiddenKeysFn = fn
+}
+
+/** 设置文件变更回调（手机端删除文件后通知主 App 刷新） */
+export function setFilesChangedCallback(fn: () => void): void {
+  filesChangedFn = fn
 }
 
 /** 设置投稿完成状态查询回调 */
@@ -168,17 +228,22 @@ export function updateScanResults(groups: VideoGroup[]): void {
   lastGroups = groups
 }
 
+/** 判断分组是否在排除列表（兼容旧 key 格式「日期_标题」，等于排除当天该主播全部场次） */
+function isGroupHidden(g: { key: string; date: string; title: string }, hiddenKeys: Set<string>): boolean {
+  return hiddenKeys.has(g.key) || hiddenKeys.has(`${g.date}_${g.title}`)
+}
+
 /** 根据当前排除列表过滤 lastGroups（桌面端排除分组后调用） */
 export function applyExcludeFilter(): void {
   if (loadConfigFn) configRef = loadConfigFn()
   const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
-  lastGroups = lastGroups.filter((g) => !hiddenKeys.has(g.key))
+  lastGroups = lastGroups.filter((g) => !isGroupHidden(g, hiddenKeys))
 }
 
 /** 获取过滤后的分组列表 */
 function getFilteredGroups(): VideoGroup[] {
   const hiddenKeys = new Set(configRef.hiddenFolderKeys || [])
-  return lastGroups.filter((g) => !hiddenKeys.has(g.key))
+  return lastGroups.filter((g) => !isGroupHidden(g, hiddenKeys))
 }
 
 /** 获取控制服务器地址 */
@@ -399,7 +464,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // POST /api/merged-files/remove 和 /api/merged-files/clear 已移除
   // 投稿列表现在是输出文件夹的实时扫描，不再维护内存列表
 
-  // POST /api/segments/delete - 删除分组的所有文件：分段源文件 + 已合并的 MP4（移至回收站）
+  // POST /api/segments/delete - 删除分组：只删除分段源文件（移至回收站），不碰已合并的 MP4
   if (path === '/api/segments/delete' && method === 'POST') {
     try {
       const body = JSON.parse(await readBody(req))
@@ -409,26 +474,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
 
-      if (loadConfigFn) configRef = loadConfigFn()
-      const outputFolder = configRef.outputFolder || ''
+      refreshConfigFromDisk()
 
       let totalSegmentsDeleted = 0
-      let totalMp4Deleted = 0
       const deletedGroups: string[] = []
 
-      // 一次性扫描输出文件夹中的所有 MP4
-      let outputMp4s: string[] = []
-      if (outputFolder && existsSync(outputFolder)) {
-        try {
-          outputMp4s = readdirSync(outputFolder).filter((f) => f.toLowerCase().endsWith('.mp4'))
-        } catch { /* 忽略 */ }
-      }
-
       for (const group of groups) {
-        const liveDate = group.date || ''
-        const liveTitle = group.title || ''
-
-        // 1. 删除分段源文件
+        // 1. 删除该分组的分段源文件（按前端传入的精确路径逐个删，不按文件名猜）
         for (const file of group.files) {
           try {
             if (existsSync(file.path)) {
@@ -440,29 +492,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           }
         }
 
-        // 2. 查找并删除已合并的 MP4（输出格式：{直播日期}_{标题}_{合并日期}_{时间}_合并版.mp4）
-        //    规则：日期钉死开头 + 标题片段（前后带下划线界定），且只删 _合并版.mp4 结尾 → 不误删跨日期同标题、不子串误删、不受标题特殊字符影响
-        const dateLower = (liveDate || '').toLowerCase()
-        const titleLower = (liveTitle || '').toLowerCase()
-        const titleFrag = `_${titleLower}_`
-        for (const mp4Name of outputMp4s) {
-          const mp4Lower = mp4Name.toLowerCase()
-          if (!mp4Lower.endsWith('_合并版.mp4')) continue
-          let matched = false
-          if (dateLower && titleLower && mp4Lower.startsWith(dateLower) && mp4Lower.includes(titleFrag)) matched = true
-          if (dateLower && titleLower && mp4Lower.startsWith(titleLower) && mp4Lower.includes(`_${dateLower}_`)) matched = true
-          if (matched) {
-            try {
-              await shell.trashItem(join(outputFolder, mp4Name))
-              outputMp4s = outputMp4s.filter((n) => n !== mp4Name)
-              totalMp4Deleted++
-            } catch (e) {
-              console.warn('[ControlServer] MP4 移至回收站失败:', mp4Name, e)
-            }
-          }
-        }
-
         deletedGroups.push(group.folderName)
+
+        // 2. 清理该场次的已合并记录（按时间区间精确清理，保留同一天其他场次）
+        removeMergedSessionForGroup(group)
       }
 
       // 使缓存失效
@@ -488,11 +521,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         }
         // 应用排除列表
         const hiddenKeys = new Set((configRef.hiddenFolderKeys || []))
-        lastGroups = lastGroups.filter((g) => !hiddenKeys.has(g.key))
+        lastGroups = lastGroups.filter((g) => !isGroupHidden(g, hiddenKeys))
       }
 
-      console.log(`[ControlServer] 已删除 ${deletedGroups.length} 个分组，分段 ${totalSegmentsDeleted} 个 + MP4 ${totalMp4Deleted} 个`)
-      sendJson(res, 200, { success: true, groupCount: deletedGroups.length, segmentCount: totalSegmentsDeleted, mp4Count: totalMp4Deleted, groups: lastGroups })
+      console.log(`[ControlServer] 已删除 ${deletedGroups.length} 个分组，分段源文件 ${totalSegmentsDeleted} 个`)
+      sendJson(res, 200, { success: true, groupCount: deletedGroups.length, segmentCount: totalSegmentsDeleted, mp4Count: 0, groups: lastGroups })
     } catch (e: unknown) {
       console.error('[ControlServer] 删除分组失败:', e)
       sendJson(res, 500, { error: String(e) })
@@ -500,7 +533,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return
   }
 
-  // POST /api/merged-files/delete - 删除已合并 MP4 及对应分段文件（移至回收站）
+  // POST /api/merged-files/delete - 删除单个已合并 MP4（移至回收站，不动分段源文件）
   if (path === '/api/merged-files/delete' && method === 'POST') {
     try {
       const body = JSON.parse(await readBody(req))
@@ -510,65 +543,39 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
 
-      if (loadConfigFn) configRef = loadConfigFn()
+      refreshConfigFromDisk()
       const outputFolder = configRef.outputFolder || ''
-      const inputFolder = configRef.inputFolder || ''
-      const inputFolder2 = configRef.inputFolder2 || ''
 
-      const mp4Path = join(outputFolder, fileName)
+      // 安全校验：只允许删除输出目录内的文件（防止 fileName 含 .. 逃逸删除任意路径）
+      const safeName = basename(fileName)
+      const mp4Path = join(outputFolder, safeName)
       if (!existsSync(mp4Path)) {
         sendJson(res, 404, { error: '文件不存在' })
         return
       }
 
-      // 从 MP4 文件名提取日期和标题
-      let liveDate = ''
-      let liveTitle = ''
-      let m = fileName.match(/^(.+?)_(\d{4}-\d{2}-\d{2})\.mp4$/i)
-      if (m) { liveTitle = m[1]; liveDate = m[2] }
-      else { m = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/); if (m) { liveDate = m[1]; liveTitle = m[2] } }
-
-      // 查找匹配的分段文件
-      const VIDEO_EXTS = ['.flv', '.m4s', '.blv']
-      const isVideoFile = (name: string): boolean => VIDEO_EXTS.some(ext => name.toLowerCase().endsWith(ext))
-      const stripVideoExt = (name: string): string => { let n = name; for (const ext of VIDEO_EXTS) { if (n.toLowerCase().endsWith(ext)) return n.slice(0, -ext.length) } return n }
-      const parseSegName = (name: string): { date: string; title: string } => {
-        const noExt = stripVideoExt(name).replace(/_PART\d+$/i, '')
-        const match = noExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
-        if (match) return { date: match[1], title: match[3].trim() || '未命名' }
-        return { date: '未知日期', title: noExt.trim() || '未命名' }
-      }
-      const segmentFiles: string[] = []
-      const findSegments = (dir: string): void => {
-        if (!dir || !existsSync(dir)) return
-        try {
-          const entries = readdirSync(dir, { withFileTypes: true })
-          for (const entry of entries) {
-            const fullPath = join(dir, entry.name)
-            if (entry.isDirectory() && !entry.name.startsWith('.')) findSegments(fullPath)
-            else if (entry.isFile() && isVideoFile(entry.name)) {
-              const parsed = parseSegName(entry.name)
-              if (parsed.date === liveDate && parsed.title === liveTitle) segmentFiles.push(fullPath)
-            }
-          }
-        } catch { /* 跳过 */ }
-      }
-      findSegments(inputFolder)
-      if (inputFolder2 && inputFolder2 !== inputFolder) findSegments(inputFolder2)
-
-      // 移至回收站
+      // 删除投稿 MP4：只删 MP4 文件本身（移至回收站），不动分段源文件
+      // 分段源文件由「删除分组」和「清理文件」入口管理，职责分离，互不误删
       await shell.trashItem(mp4Path)
-      let segDeleted = 0
-      for (const segPath of segmentFiles) {
-        try { await shell.trashItem(segPath); segDeleted++ } catch (e) { console.warn('[ControlServer] 分段移至回收站失败:', segPath, e) }
-      }
 
       invalidateCache()
       videoFileCache.clear()
       cachedMergedFilesTime = 0
 
-      console.log(`[ControlServer] 已删除 ${fileName} + ${segDeleted} 个分段文件`)
-      sendJson(res, 200, { success: true, segmentCount: segDeleted })
+      // 清理对应的场次记录：分段源文件仍在，重新扫描后该场次会重新出现在分组里，可再次合并；
+      // 同一天其他场次若还有合并 MP4，保留其记录（新格式按场次精确清理，旧格式由 legacy 兜底隐藏）
+      refreshConfigFromDisk()
+      const sessions = removeMergedSessionsForDeletedMp4(configRef.mergedSessions || [], safeName)
+      if (sessions.length !== (configRef.mergedSessions || []).length) {
+        if (saveConfigFn) {
+          const next = { ...configRef, mergedSessions: sessions }
+          saveConfigFn(next)
+          configRef = next
+        }
+      }
+
+      console.log(`[ControlServer] 已删除合并 MP4: ${safeName}`)
+      sendJson(res, 200, { success: true, segmentCount: 0 })
     } catch (e: unknown) {
       console.error('[ControlServer] 删除失败:', e)
       sendJson(res, 500, { error: String(e) })
@@ -576,10 +583,189 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return
   }
 
+  // GET /api/files - 清理文件面板：列出所有分段源文件 + 已合并 MP4
+  if (path === '/api/files' && method === 'GET') {
+    try {
+      refreshConfigFromDisk()
+      const inputFolders = [configRef.inputFolder, configRef.inputFolder2].filter(Boolean) as string[]
+      const outputFolder = configRef.outputFolder || ''
+      const segments: Array<{ path: string; name: string; size: number; mtime: number; date: string; title: string; timestamp?: number; sessionKey?: string }> = []
+      const merged: Array<{ path: string; name: string; size: number; mtime: number; date: string; title: string }> = []
+
+      const VIDEO_EXTS = ['.flv', '.m4s', '.blv']
+      const isVideoFile = (name: string): boolean => VIDEO_EXTS.some((ext) => name.toLowerCase().endsWith(ext))
+      const stripVideoExt = (name: string): string => {
+        for (const ext of VIDEO_EXTS) {
+          if (name.toLowerCase().endsWith(ext)) return name.slice(0, -ext.length)
+        }
+        return name
+      }
+      const parseSegName = (name: string): { date: string; title: string; timestamp: number } => {
+        const noExt = stripVideoExt(name).replace(/_PART\d+$/i, '')
+        const m = noExt.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}-\d{2}-\d{2}-\d{3})\s*(.+)$/)
+        if (m) {
+          const t = m[2].split('-')
+          const timestamp = new Date(`${m[1]}T${t[0]}:${t[1]}:${t[2]}`).getTime()
+          return { date: m[1], title: m[3].trim() || '未命名', timestamp: Number.isNaN(timestamp) ? 0 : timestamp }
+        }
+        return { date: '未知日期', title: noExt.trim() || '未命名', timestamp: 0 }
+      }
+      const scanDir = (dir: string): void => {
+        if (!dir || !existsSync(dir)) return
+        try {
+          const entries = readdirSync(dir, { withFileTypes: true })
+          for (const entry of entries) {
+            if (entry.name.startsWith('.')) continue
+            const full = join(dir, entry.name)
+            try {
+              if (entry.isDirectory()) scanDir(full)
+              else if (entry.isFile() && isVideoFile(entry.name)) {
+                const s = statSync(full)
+                const p = parseSegName(entry.name)
+                segments.push({ path: full, name: entry.name, size: s.size, mtime: s.mtimeMs, date: p.date, title: p.title, timestamp: p.timestamp })
+              }
+            } catch { /* 跳过 */ }
+          }
+        } catch { /* 跳过 */ }
+      }
+      for (const dir of inputFolders) scanDir(dir)
+
+      if (outputFolder && existsSync(outputFolder)) {
+        try {
+          for (const name of readdirSync(outputFolder)) {
+            if (!name.toLowerCase().endsWith('.mp4')) continue
+            const full = join(outputFolder, name)
+            try {
+              const s = statSync(full)
+              const p = parseMergedFileName(name)
+              merged.push({ path: full, name, size: s.size, mtime: s.mtimeMs, date: p.date, title: p.title })
+            } catch { /* 跳过 */ }
+          }
+        } catch { /* 跳过 */ }
+      }
+
+      // 按场次分组：完整复用 performScan 的分组规则（同标题且间隔 ≤ maxIntervalHours 视为同一场，
+      // 支持跨天；间隔过大时回查已有分组，标题回切也能归回同一场）
+      const MAX_GAP = (configRef.maxIntervalHours || 2.5) * 60 * 60 * 1000
+      segments.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+      const pad2 = (n: number): string => String(n).padStart(2, '0')
+      const makeKey = (seg: { date: string; title: string; timestamp?: number }): string => {
+        const d = new Date(seg.timestamp ?? 0)
+        return `${seg.date}_${seg.title}_${Number.isNaN(d.getTime()) ? '000000' : pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds())}`
+      }
+      let curKey = ''
+      let curTitle = ''
+      let curLast = -Infinity
+      const groupStates: Array<{ key: string; title: string; last: number }> = []
+      for (const seg of segments) {
+        const ts = seg.timestamp ?? 0
+        let ownerKey = ''
+        if (!curKey) {
+          curKey = makeKey(seg); curTitle = seg.title; curLast = ts; ownerKey = curKey
+        } else if (seg.title === curTitle && ts - curLast <= MAX_GAP) {
+          curLast = ts; ownerKey = curKey
+        } else {
+          const matched = groupStates.find((g) => g.title === seg.title && ts - g.last <= MAX_GAP)
+          if (matched) { matched.last = ts; ownerKey = matched.key }
+          else {
+            groupStates.push({ key: curKey, title: curTitle, last: curLast })
+            curKey = makeKey(seg); curTitle = seg.title; curLast = ts; ownerKey = curKey
+          }
+        }
+        seg.sessionKey = ownerKey
+      }
+      segments.sort((a, b) => b.date.localeCompare(a.date) || a.title.localeCompare(b.title) || a.name.localeCompare(b.name))
+
+      console.log(`[ControlServer] /api/files: 分段 ${segments.length} 个，已合并 MP4 ${merged.length} 个`)
+      sendJson(res, 200, { segments, merged })
+    } catch (e: unknown) {
+      console.error('[ControlServer] /api/files 失败:', e)
+      sendJson(res, 500, { error: String(e) })
+    }
+    return
+  }
+
+  // POST /api/files/delete - 批量删除指定文件（移至回收站）
+  if (path === '/api/files/delete' && method === 'POST') {
+    try {
+      const body = JSON.parse(await readBody(req))
+      const paths: string[] = body.paths || []
+      if (paths.length === 0) {
+        sendJson(res, 200, { success: true, deleted: 0, failed: [] })
+        return
+      }
+      let deleted = 0
+      const failed: string[] = []
+      // 路径白名单：只允许删除输入目录或输出目录下的文件
+      refreshConfigFromDisk()
+      const allowedBases = [configRef.inputFolder, configRef.inputFolder2, configRef.outputFolder].filter(Boolean) as string[]
+      const isAllowed = (p: string): boolean => {
+        if (!p) return false
+        const abs = resolve(p)
+        return allowedBases.some((base) => {
+          if (!base) return false
+          const rel = relative(resolve(base), abs)
+          return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+        })
+      }
+      const validPaths = paths.filter(isAllowed)
+      failed.push(...paths.filter((p) => !isAllowed(p)))
+
+      const deletedPaths: string[] = []
+      for (const p of validPaths) {
+        try {
+          if (existsSync(p)) {
+            await shell.trashItem(p)
+            deleted++
+            deletedPaths.push(p)
+          } else {
+            failed.push(p)
+          }
+        } catch (e) {
+          console.warn('[ControlServer] 移至回收站失败:', p, e)
+          failed.push(p)
+        }
+      }
+
+      // 清理已合并场次记录：只对成功删除的文件清理（避免删除失败却清除记录）
+      let sessions = configRef.mergedSessions || []
+      for (const p of deletedPaths) {
+        const name = basename(p)
+        if (name.toLowerCase().endsWith('.mp4')) {
+          sessions = removeMergedSessionsForDeletedMp4(sessions, name)
+        } else {
+          const s = parseSessionFromFilePaths([p])
+          if (s) sessions = removeMergedSessionsByGroup(sessions, s.date, s.title, s.startTs, s.endTs)
+        }
+      }
+      if (sessions.length !== (configRef.mergedSessions || []).length) {
+        if (saveConfigFn) {
+          const next = { ...configRef, mergedSessions: sessions }
+          saveConfigFn(next)
+          configRef = next
+        }
+      }
+
+      invalidateCache()
+      videoFileCache.clear()
+      cachedMergedFilesTime = 0
+
+      // 通知主 App 文件已变更（清扫描缓存并刷新桌面端列表）
+      if (filesChangedFn) filesChangedFn()
+
+      console.log(`[ControlServer] /api/files/delete: 删除 ${deleted} 个，失败 ${failed.length} 个`)
+      sendJson(res, 200, { success: true, deleted, failed })
+    } catch (e: unknown) {
+      console.error('[ControlServer] /api/files/delete 失败:', e)
+      sendJson(res, 500, { error: String(e) })
+    }
+    return
+  }
+
   // GET /api/groups
   if (path === '/api/groups' && method === 'GET') {
-    // 应用排除列表过滤（确保手机端始终与桌面端同步）
-    if (loadConfigFn) configRef = loadConfigFn()
+    // 应用排除列表过滤（确保手机端始终与桌面端同步，强制读取磁盘最新配置）
+    refreshConfigFromDisk()
     sendJson(res, 200, { groups: getFilteredGroups() })
     return
   }
@@ -597,7 +783,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     try {
       isScanning = true
       appStatus = 'scanning'; appStatusSince = Date.now()
-      if (loadConfigFn) configRef = loadConfigFn()
+      refreshConfigFromDisk()
       const inputFolder = configRef.inputFolder
       const maxInterval = configRef.maxIntervalHours || 2.5
       if (!inputFolder) {
@@ -618,10 +804,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         }
         lastGroups = Array.from(merged.values())
       }
-      // 应用排除列表
-      if (loadConfigFn) configRef = loadConfigFn()
+      // 应用排除列表（强制读取磁盘最新配置，避免缓存陈旧导致已排除分组重新显示）
+      refreshConfigFromDisk()
       const scanHiddenKeys = new Set(configRef.hiddenFolderKeys || [])
-      lastGroups = lastGroups.filter((g) => !scanHiddenKeys.has(g.key))
+      lastGroups = lastGroups.filter((g) => !isGroupHidden(g, scanHiddenKeys))
       appStatus = 'idle'; appStatusSince = Date.now()
       isScanning = false
       sendJson(res, 200, { groups: lastGroups })
@@ -673,6 +859,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       })
       mergePercent = 100
 
+      // 合并成功，记录该场次（方案 A：区分同一天多场直播）
+      recordMergedSessionFromGroup(group)
+
       appStatus = 'idle'; appStatusSince = Date.now()
       if (setIsMergingFn) setIsMergingFn(false)
       currentMergeTask = ''
@@ -704,7 +893,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       // 合并后重新应用排除列表
       if (loadConfigFn) configRef = loadConfigFn()
       const hiddenKeysAfterMerge = new Set(configRef.hiddenFolderKeys || [])
-      lastGroups = lastGroups.filter((g) => !hiddenKeysAfterMerge.has(g.key))
+      lastGroups = lastGroups.filter((g) => !isGroupHidden(g, hiddenKeysAfterMerge))
 
       sendJson(res, 200, { success: true, outputPath, groups: lastGroups })
     } catch (e: unknown) {
@@ -814,7 +1003,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         sendJson(res, 400, { error: '未指定排除分组' })
         return
       }
-      if (loadConfigFn) configRef = loadConfigFn()
+      refreshConfigFromDisk()
       const currentHidden = new Set(configRef.hiddenFolderKeys || [])
       keys.forEach((k) => currentHidden.add(k))
       const newHidden = Array.from(currentHidden)
@@ -836,9 +1025,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     try {
       const body = JSON.parse(await readBody(req))
       const keys: string[] = body.keys || []
-      if (loadConfigFn) configRef = loadConfigFn()
+      refreshConfigFromDisk()
       const currentHidden = new Set(configRef.hiddenFolderKeys || [])
-      keys.forEach((k) => currentHidden.delete(k))
+      // 同时移除新 key 和旧 key（日期_标题），兼容升级前的排除记录
+      keys.forEach((k) => { currentHidden.delete(k); currentHidden.delete(k.replace(/_\d{6}$/, '')) })
       const newHidden = Array.from(currentHidden)
       if (saveConfigFn) saveConfigFn({ ...configRef, hiddenFolderKeys: newHidden })
       // 通知主 App 同步
@@ -850,7 +1040,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         lastGroups = await scanFromMainApp(inputFolder, maxInterval)
         // 应用新的排除列表
         const hiddenSet = new Set(newHidden)
-        lastGroups = lastGroups.filter((g) => !hiddenSet.has(g.key))
+        lastGroups = lastGroups.filter((g) => !isGroupHidden(g, hiddenSet))
       }
       sendJson(res, 200, { success: true, groups: lastGroups })
     } catch (e: unknown) {
@@ -862,14 +1052,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // GET /api/groups/excluded - 获取已排除的分组
   if (path === '/api/groups/excluded' && method === 'GET') {
     try {
-      if (loadConfigFn) configRef = loadConfigFn()
+      refreshConfigFromDisk()
       const hiddenKeys = configRef.hiddenFolderKeys || []
       // 需要全量扫描才能知道被排除的分组名称
       const inputFolder = configRef.inputFolder
       const maxInterval = configRef.maxIntervalHours || 2.5
       if (inputFolder && scanFromMainApp) {
         const allGroups = await scanFromMainApp(inputFolder, maxInterval)
-        const excluded = allGroups.filter((g) => hiddenKeys.includes(g.key))
+        // 兼容旧 key（日期_标题）：旧排除记录按 日期+标题 匹配
+        const excluded = allGroups.filter((g) => hiddenKeys.includes(g.key) || hiddenKeys.includes(`${g.date}_${g.title}`))
         sendJson(res, 200, { excluded })
       } else {
         sendJson(res, 200, { excluded: [] })
@@ -928,6 +1119,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           mergePercent = Math.round(((i + percent / 100) / totalGroups) * 100)
         })
         results.push(outputPath)
+        // 合并成功，记录该场次（方案 A：区分同一天多场直播）
+        recordMergedSessionFromGroup(group)
       }
 
       mergePercent = 100
@@ -1086,6 +1279,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 /* 投稿列表展开/收起 */
 .upload-expand{text-align:center;padding:14px 0;color:var(--primary);font-size:13px;font-weight:500;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
 .upload-expand:active{opacity:.7}
+/* 清理页子 Tab（原文件 / 已合并文件） */
+.cleanup-subtabs{display:flex;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px}
+.cleanup-subtab{flex:1;text-align:center;padding:10px 0;font-size:14px;color:var(--text-secondary);cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
+.cleanup-subtab.active{background:var(--primary);color:#fff;font-weight:500}
 /* 视频预览浮层 */
 .video-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.92);z-index:999;flex-direction:column;align-items:center;justify-content:center}
 .video-overlay video{max-width:100%;max-height:80vh;border-radius:4px}
@@ -1163,6 +1360,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="tab active" onclick="switchTab('groups')">分组</div>
     <div class="tab" onclick="switchTab('excluded')">已排除</div>
     <div class="tab" onclick="switchTab('upload')">投稿</div>
+    <div class="tab" onclick="switchTab('cleanup')">清理</div>
     <div class="tab" onclick="switchTab('settings')">设置</div>
     <div class="tab" onclick="switchTab('phone')">📱 手机视频</div>
   </div>
@@ -1204,6 +1402,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div id="uploadFileList"><div class="empty">暂无已合并文件，请先合并</div></div>
       <div style="margin-top:12px">
         <button class="btn btn-success btn-block" onclick="doUploadSelected()" id="uploadSelectedBtn" disabled>投稿选中文件</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 清理页：按直播场次管理原文件与已合并文件，可整场删除 -->
+  <div id="tabCleanup" class="hidden">
+    <div class="card">
+      <h3>清理文件 <span style="float:right;font-size:12px;color:#1890ff;cursor:pointer" onclick="loadCleanup()">🔄 刷新</span></h3>
+      <div class="cleanup-subtabs">
+        <div class="cleanup-subtab active" id="cleanupSubSeg" onclick="switchCleanupSub('segments')">原文件</div>
+        <div class="cleanup-subtab" id="cleanupSubMerged" onclick="switchCleanupSub('merged')">已合并文件</div>
+      </div>
+      <div id="cleanupSegPanel">
+        <div style="font-size:12px;color:#888;margin-bottom:8px">按直播场次分组，勾选整场删除（移至回收站）。</div>
+        <div id="cleanupSegGroups"><div class="empty">加载中...</div></div>
+        <div style="margin-top:12px">
+          <button class="btn btn-danger btn-block" onclick="deleteCleanupSelected('segments')" id="cleanupSegDeleteBtn" disabled>删除选中原文件（0）</button>
+        </div>
+      </div>
+      <div id="cleanupMergedPanel" class="hidden">
+        <div style="font-size:12px;color:#888;margin-bottom:8px">合并生成的 MP4，删除后不影响原始分段文件。</div>
+        <div id="cleanupMergedGroups"><div class="empty">加载中...</div></div>
+        <div style="margin-top:12px">
+          <button class="btn btn-danger btn-block" onclick="deleteCleanupSelected('merged')" id="cleanupMergedDeleteBtn" disabled>删除选中已合并文件（0）</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1344,16 +1567,18 @@ async function doLogin() {
 
 // === Tab 切换 ===
 function switchTab(tab) {
-  var tabs = ['groups','excluded','upload','settings','phone'];
+  var tabs = ['groups','excluded','upload','cleanup','settings','phone'];
   document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', tabs[i] === tab));
   document.getElementById('tabGroups').classList.toggle('hidden', tab !== 'groups');
   document.getElementById('tabExcluded').classList.toggle('hidden', tab !== 'excluded');
   document.getElementById('tabUpload').classList.toggle('hidden', tab !== 'upload');
+  document.getElementById('tabCleanup').classList.toggle('hidden', tab !== 'cleanup');
   document.getElementById('tabSettings').classList.toggle('hidden', tab !== 'settings');
   document.getElementById('tabPhone').classList.toggle('hidden', tab !== 'phone');
   document.getElementById('bottomBar').style.display = tab === 'groups' ? 'flex' : 'none';
   if (tab === 'excluded') loadExcluded();
   if (tab === 'upload') loadMergedFiles();
+  if (tab === 'cleanup') loadCleanup();
   if (tab === 'settings') loadSettings();
 }
 
@@ -1486,7 +1711,6 @@ function renderGroups() {
         '<div class="group-meta">' + g.fileCount + ' 个文件 | ' + sizeMB + ' MB</div>' +
       '</div>' +
       '<button class="btn btn-danger" onclick="doExcludeSingle(\\'' + g.key + '\\')" style="flex-shrink:0;margin-left:8px;font-size:12px;padding:6px 10px;min-height:auto">排除</button>' +
-      '<button class="btn btn-danger" onclick="doDeleteSegments(\\'' + g.key + '\\')" style="flex-shrink:0;margin-left:4px;font-size:12px;padding:6px 10px;min-height:auto;background:#ff7875">删除</button>' +
     '</div>';
   }).join('');
 }
@@ -1573,25 +1797,6 @@ async function doExcludeSingle(key) {
   } catch (e) { toast('排除失败'); }
 }
 
-// === 删除分组的所有文件（分段+已合并MP4） ===
-async function doDeleteSegments(key) {
-  var g = groups.find(function(item) { return item.key === key; });
-  if (!g) return;
-  if (!confirm('确定删除此分组的所有文件？\\n' + g.folderName + '（' + g.fileCount + ' 个分段 + 已合并MP4）\\n文件将移至回收站')) return;
-  toast('正在删除...');
-  try {
-    var data = await api('POST', '/api/segments/delete', {
-      groups: [{ key: g.key, folderName: g.folderName, date: g.date, title: g.title, files: g.files.map(function(f) { return { path: f.path }; }) }]
-    });
-    if (data && data.error) { toast(data.error); return; }
-    groups = data.groups || []; selectedKeys.clear(); renderGroups(); updateBatchBtn();
-    var parts = [];
-    if (data.segmentCount > 0) parts.push(data.segmentCount + ' 个分段');
-    if (data.mp4Count > 0) parts.push(data.mp4Count + ' 个合并视频');
-    toast('已删除：' + (parts.join('、') || '无文件'));
-  } catch (e) { toast('删除失败'); }
-}
-
 async function doExclude() {
   if (selectedKeys.size === 0) { toast('请先选择分组'); return; }
   if (!confirm('确定排除 ' + selectedKeys.size + ' 个分组？')) return;
@@ -1644,6 +1849,117 @@ async function loadMergedFiles() {
   } catch (e) {}
 }
 
+// === 清理Tab：按直播场次管理原文件与已合并文件，可整场删除 ===
+var cleanupData = { segments: [], merged: [] };
+var cleanupSegSelected = new Set();
+var cleanupMergedSelected = new Set();
+var cleanupExpanded = {};  // type_idx -> true，重渲染后保持展开状态
+var cleanupSubTab = 'segments';  // 当前子 Tab：segments / merged
+
+function switchCleanupSub(tab) {
+  cleanupSubTab = tab;
+  document.getElementById('cleanupSubSeg').classList.toggle('active', tab === 'segments');
+  document.getElementById('cleanupSubMerged').classList.toggle('active', tab === 'merged');
+  document.getElementById('cleanupSegPanel').classList.toggle('hidden', tab !== 'segments');
+  document.getElementById('cleanupMergedPanel').classList.toggle('hidden', tab !== 'merged');
+}
+
+function groupCleanupItems(items) {
+  var map = {};
+  items.forEach(function(it) {
+    var k = it.sessionKey || (it.date + '|' + it.title);
+    if (!map[k]) map[k] = { date: it.date, title: it.title, files: [], totalSize: 0 };
+    map[k].files.push(it);
+    map[k].totalSize += it.size;
+  });
+  var arr = Object.keys(map).map(function(k) { return map[k]; });
+  arr.sort(function(a, b) { return b.date.localeCompare(a.date) || a.title.localeCompare(b.title); });
+  return arr;
+}
+
+function fmtMB(bytes) {
+  if (!bytes) return '0MB';
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(2) + 'GB';
+  return (bytes / 1024 / 1024).toFixed(0) + 'MB';
+}
+
+async function loadCleanup() {
+  try {
+    const data = await api('GET', '/api/files');
+    if (!data) return;
+    cleanupData = data;
+    cleanupSegSelected = new Set();
+    cleanupMergedSelected = new Set();
+    cleanupExpanded = {};  // 分组会重新排序，旧展开索引失效，全部收起
+    renderCleanup();
+  } catch (e) { toast('加载失败'); }
+}
+
+function cleanupGroupHtml(type, groups, selected) {
+  if (groups.length === 0) return '<div class="empty">暂无文件</div>';
+  return groups.map(function(g, idx) {
+    var checked = g.files.every(function(f) { return selected.has(f.path); });
+    var partial = !checked && g.files.some(function(f) { return selected.has(f.path); });
+    var detailId = type + '_detail_' + idx;
+    var detailHidden = cleanupExpanded[type + '_' + idx] ? '' : ' class="hidden"';
+    return '<div class="group-item" style="align-items:flex-start">' +
+      '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="toggleCleanupGroup(\\'' + type + '\\',' + idx + ',this.checked)">' +
+      '<div class="group-info" style="cursor:pointer" onclick="toggleCleanupExpand(\\'' + type + '\\',' + idx + ')">' +
+        '<div class="group-name"><span style="color:#999;font-size:12px;margin-right:6px">' + escHtml(g.date) + '</span>' + escHtml(g.title) + '</div>' +
+        '<div class="group-meta">' + g.files.length + ' 个文件 | ' + fmtMB(g.totalSize) + (partial ? '（部分选中）' : '') + '</div>' +
+        '<div id="' + detailId + '"' + detailHidden + ' style="font-size:12px;color:#999;margin-top:4px">' +
+          g.files.map(function(f) { return '<div>· ' + escHtml(f.name) + '（' + fmtMB(f.size) + '）</div>'; }).join('') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderCleanup() {
+  var segGroups = groupCleanupItems(cleanupData.segments);
+  var mergedGroups = groupCleanupItems(cleanupData.merged);
+  document.getElementById('cleanupSegGroups').innerHTML = cleanupGroupHtml('segments', segGroups, cleanupSegSelected);
+  document.getElementById('cleanupMergedGroups').innerHTML = cleanupGroupHtml('merged', mergedGroups, cleanupMergedSelected);
+
+  var segBtn = document.getElementById('cleanupSegDeleteBtn');
+  segBtn.disabled = cleanupSegSelected.size === 0;
+  segBtn.textContent = '删除选中原文件（' + cleanupSegSelected.size + '）';
+  var mergedBtn = document.getElementById('cleanupMergedDeleteBtn');
+  mergedBtn.disabled = cleanupMergedSelected.size === 0;
+  mergedBtn.textContent = '删除选中已合并文件（' + cleanupMergedSelected.size + '）';
+}
+
+function toggleCleanupGroup(type, idx, checked) {
+  var groups = groupCleanupItems(type === 'segments' ? cleanupData.segments : cleanupData.merged);
+  var g = groups[idx];
+  if (!g) return;
+  var sel = type === 'segments' ? cleanupSegSelected : cleanupMergedSelected;
+  g.files.forEach(function(f) { if (checked) sel.add(f.path); else sel.delete(f.path); });
+  renderCleanup();
+}
+
+function toggleCleanupExpand(type, idx) {
+  var key = type + '_' + idx;
+  cleanupExpanded[key] = !cleanupExpanded[key];
+  var el = document.getElementById(type + '_detail_' + idx);
+  if (el) el.classList.toggle('hidden');
+}
+
+async function deleteCleanupSelected(type) {
+  var sel = type === 'segments' ? cleanupSegSelected : cleanupMergedSelected;
+  if (sel.size === 0) return;
+  var label = type === 'segments' ? '原文件' : '已合并文件';
+  if (!confirm('确定删除选中的 ' + sel.size + ' 个' + label + '？\\n文件将移至回收站，删除后不可恢复。')) return;
+  toast('正在删除...');
+  try {
+    const data = await api('POST', '/api/files/delete', { paths: Array.from(sel) });
+    if (data && data.error) { toast(data.error); return; }
+    var failed = (data.failed || []).length;
+    toast('已删除 ' + (data.deleted || 0) + ' 个文件' + (failed ? '，' + failed + ' 个失败' : ''));
+    await loadCleanup();
+  } catch (e) { toast('删除失败'); }
+}
+
 function formatMtime(ms) {
   if (!ms) return '';
   var d = new Date(ms);
@@ -1655,13 +1971,16 @@ function formatMtime(ms) {
 // 新：95老阿姨_2026-07-09.mp4 → 95老阿姨 (2026-07-09)
 // 旧：2026-07-09_95老阿姨_2026-07-10_135840_合并版.mp4 → 2026-07-09 95老阿姨
 function formatUploadName(fileName) {
-  // 新格式：Title_YYYY-MM-DD.mp4
-  var m = fileName.match(/^(.+?)_(\\d{4}-\\d{2}-\\d{2})\\.mp4$/i);
-  if (m) return m[1] + ' (' + m[2] + ')';
+  // 新格式：Title_YYYY-MM-DD.mp4 或 Title_YYYY-MM-DD_HHMMSS.mp4（带场次开始时间）
+  var m = fileName.match(/^(.+?)_(\d{4}-\d{2}-\d{2})(?:_(\d{2})(\d{2})\d{2})?\.mp4$/i);
+  if (m) {
+    var timeSuffix = (m[3] && m[4]) ? ' ' + m[3] + ':' + m[4] : '';
+    return m[1] + ' (' + m[2] + timeSuffix + ')';
+  }
   // 旧格式：YYYY-MM-DD_Title_...
-  m = fileName.match(/^(\\d{4}-\\d{2}-\\d{2})_(.+?)_/);
+  m = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+?)_/);
   if (m) return m[1] + ' ' + m[2];
-  return fileName.replace(/\\.mp4$/i, '');
+  return fileName.replace(/\.mp4$/i, '');
 }
 
 function renderUploadList() {
@@ -1683,7 +2002,6 @@ function renderUploadList() {
       '<input type="checkbox" class="group-check" ' + checked + ' onchange="toggleUploadSelect(' + i + ', this.checked)">' +
       '<div class="group-info"><div class="group-name">' + escHtml(formatUploadName(f.name)) + '</div><div class="group-meta">' + formatMtime(f.mtime) + '</div></div>' +
       '<span onclick="openVideoPreview(\\\'' + escHtml(f.name) + '\\\')" style="font-size:18px;padding:8px;cursor:pointer;flex-shrink:0" title="预览">▶️</span>' +
-      '<span onclick="doDeleteMergedFile(\\\'' + escHtml(f.name) + '\\\')" style="font-size:16px;padding:8px;cursor:pointer;flex-shrink:0;color:#ff4d4f" title="删除">🗑️</span>' +
     '</div>';
   }).join('');
 
@@ -1751,19 +2069,6 @@ async function doUploadSelected() {
     uploadSelectedKeys.clear();
     await loadMergedFiles();
   } catch (e) { toast('投稿失败'); }
-}
-
-// === 删除已合并 MP4 及对应分段文件 ===
-async function doDeleteMergedFile(fileName) {
-  if (!confirm('确定删除此视频？\\n将同时删除对应的分段源文件（移至回收站）')) return;
-  toast('正在删除...');
-  try {
-    var data = await api('POST', '/api/merged-files/delete', { fileName: fileName });
-    if (data && data.error) { toast(data.error); return; }
-    var segCount = data ? data.segmentCount : 0;
-    toast('已删除，清理了 ' + segCount + ' 个分段文件');
-    await loadMergedFiles();
-  } catch (e) { toast('删除失败'); }
 }
 
 // === 设置 ===

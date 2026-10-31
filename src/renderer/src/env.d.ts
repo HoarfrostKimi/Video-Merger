@@ -38,12 +38,17 @@ interface Window {
     // 已合并文件（投稿页）
     getMergedFiles: () => Promise<Array<{ index: number; name: string; path: string; mtime: number }>>
     uploadMergedFiles: (filePaths: string[]) => Promise<{ fileUrls: string[] }>
+    // 清理文件面板
+    listAllFiles: () => Promise<{ segments: CleanupFileItem[]; merged: CleanupFileItem[] }>
+    deleteFiles: (paths: string[]) => Promise<{ deleted: number; failed: string[] }>
     // 后台运行
     minimizeToTray: () => Promise<void>
     restoreFromTray: () => Promise<void>
     forceQuit: () => Promise<void>
     // 配置变更监听
     onConfigUpdated: (callback: () => void) => () => void
+    // 文件变更监听（手机端删除文件后同步刷新）
+    onFilesChanged: (callback: () => void) => () => void
     // 设置原生主题
     setNativeTheme: (darkMode: boolean) => Promise<void>
   }
@@ -67,6 +72,16 @@ interface AppConfig {
   controlPort?: number
   controlPassword?: string
   hiddenFolderKeys?: string[]
+  /** 自动清理：定时把 N 天前的录制片段与合并产物移至回收站（默认开启） */
+  autoCleanEnabled?: boolean
+  /** 自动清理保留天数（默认 7 天） */
+  autoCleanDays?: number
+  /** 定时自动合并：到点自动扫描并合并所有待合并分组（默认关闭） */
+  autoMergeEnabled?: boolean
+  /** 定时自动合并时间，格式 HH:mm（24 小时制） */
+  autoMergeTime?: string
+  /** 定时合并完成后自动打开 B站投稿页 */
+  autoMergeUpload?: boolean
 }
 
 interface FlvFile {
@@ -86,6 +101,22 @@ interface FolderGroup {
   files: FlvFile[]
   date: string
   title: string
+  lastTimestamp: number
+  startTimestamp: number
+}
+
+/** 清理文件面板中的单个文件项 */
+interface CleanupFileItem {
+  path: string
+  name: string
+  size: number
+  mtime: number
+  date: string
+  title: string
+  /** 该场直播开始时间戳（从文件名解析） */
+  timestamp?: number
+  /** 场次标识：同一场直播（含跨天、标题回切）的所有分段文件相同 */
+  sessionKey?: string
 }
 
 /** 扫描返回结果 */

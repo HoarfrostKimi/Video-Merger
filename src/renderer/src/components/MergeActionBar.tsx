@@ -1,6 +1,6 @@
 import React from 'react'
 import { Button, Card, Progress, Space, Typography } from 'antd'
-import { FolderOpenOutlined, MergeCellsOutlined, DeleteOutlined } from '@ant-design/icons'
+import { FolderOpenOutlined, MergeCellsOutlined, ClearOutlined } from '@ant-design/icons'
 import { formatPercent, formatTime } from '../utils/format'
 
 const { Text } = Typography
@@ -15,7 +15,7 @@ interface MergeActionBarProps {
   selectedRowKeys: React.Key[]
   onMerge: () => void
   onOpenDirectory: () => void
-  onDeleteSelected: () => void
+  onOpenCleanup: () => void
 }
 
 const MergeActionBar: React.FC<MergeActionBarProps> = React.memo(({
@@ -28,7 +28,7 @@ const MergeActionBar: React.FC<MergeActionBarProps> = React.memo(({
   selectedRowKeys,
   onMerge,
   onOpenDirectory,
-  onDeleteSelected
+  onOpenCleanup
 }) => {
   return (
     <Card size="small" style={{ borderRadius: 10 }}>
@@ -44,13 +44,11 @@ const MergeActionBar: React.FC<MergeActionBarProps> = React.memo(({
             打开目录
           </Button>
           <Button
-            danger
-            icon={<DeleteOutlined />}
-            onClick={onDeleteSelected}
-            disabled={selectedRowKeys.length === 0 || processing}
+            icon={<ClearOutlined />}
+            onClick={onOpenCleanup}
             style={{ fontSize: 13 }}
           >
-            删除选中
+            清理文件
           </Button>
           <Button
             type="primary"
