@@ -1,70 +1,5 @@
 // content.js - B站投稿助手（由 src/ 构建生成，请勿直接修改本文件）
 (() => {
-  // src/content/core/wait.js
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-  async function waitFor(condition, timeout = 8e3, interval = 300) {
-    const start = Date.now();
-    for (; ; ) {
-      const res = condition();
-      if (res) return res;
-      if (Date.now() - start >= timeout) return null;
-      await sleep(interval);
-    }
-  }
-  function waitForElement(selectors, timeout = 3e4) {
-    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
-    return new Promise((resolve, reject) => {
-      for (const sel of selectorList) {
-        const el = document.querySelector(sel);
-        if (el) return resolve(el);
-      }
-      const observer = new MutationObserver(() => {
-        for (const sel of selectorList) {
-          const el = document.querySelector(sel);
-          if (el) {
-            observer.disconnect();
-            return resolve(el);
-          }
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(`等待元素超时`));
-      }, timeout);
-    });
-  }
-  function waitForElementByText(keyword, timeout = 6e4) {
-    const check = () => {
-      for (const el of document.querySelectorAll("*")) {
-        const text = el.textContent || "";
-        if (text.includes(keyword) && text.length < 200) {
-          const rect = el.getBoundingClientRect();
-          if (rect.width > 100 && rect.height > 30) return el;
-        }
-      }
-      return null;
-    };
-    const existing = check();
-    if (existing) return Promise.resolve(existing);
-    return new Promise((resolve, reject) => {
-      const obs = new MutationObserver(() => {
-        const el = check();
-        if (el) {
-          obs.disconnect();
-          resolve(el);
-        }
-      });
-      obs.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        obs.disconnect();
-        reject(new Error(`等待「${keyword}」超时`));
-      }, timeout);
-    });
-  }
-
   // src/content/config.js
   var SELECTORS = {
     // 标题输入框（主稿件标题）
@@ -92,7 +27,6 @@
     // 标签文案也可能带「*」「（必填）」等后缀，所以选择器放宽、文案改为关键词匹配
     declarationSelect: '.el-select, .bcc-select, [class*="select"]',
     declarationTrigger: '.el-select__wrapper, .el-input__inner, [class*="select__wrapper"], [class*="select-inner"], [class*="trigger"]',
-    declarationFormItem: '.el-form-item, tr, [class*="row"], [class*="item"]',
     // 文件上传入口
     fileInputSelectors: [
       'input[type="file"][accept*="video"]',
@@ -177,13 +111,13 @@
     // 封面弹窗关闭轮询次数
     dialogGoneInterval: 250,
     // 封面弹窗关闭轮询间隔(ms)
-    afterFormLoad: 2e3,
-    // 表单加载后的稳定等待
+    afterFormLoad: 1e3,
+    // 表单加载后的稳定等待（后面还有具体元素等待兜底）
     afterTitleSet: 300,
     // 标题填写后的校验等待
     afterPartClick: 2e3,
     // 添加分P后等待
-    afterCardAppear: 2e3,
+    afterCardAppear: 1e3,
     // 视频卡片出现后等待
     clickDropdownDelay: 500,
     // 下拉点击后等待
@@ -208,31 +142,71 @@
     }
     return null;
   }
-  function findButtonByText(text) {
-    const all = document.querySelectorAll("*");
-    let bestMatch = null;
-    for (const el of all) {
-      const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-      if (normalizeText(directText) === normalizeText(text)) {
-        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-          bestMatch = el;
-        }
-      }
+  function directTextOf(el) {
+    let s = "";
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) s += n.nodeValue;
     }
-    return bestMatch ? toClickable(bestMatch) : null;
+    return s.trim();
+  }
+  function findExactTextElement(text, root) {
+    const target = normalizeText(text);
+    if (!target) return null;
+    const scope = root || document.body;
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null);
+    let bestMatch = null;
+    let node;
+    while (node = walker.nextNode()) {
+      const raw = node.nodeValue;
+      if (!raw || !raw.trim()) continue;
+      if (!raw.includes(target) && raw.trim().length > target.length + 8) continue;
+      const el = node.parentElement;
+      if (!el || el.closest && el.closest("#bili-helper-panel")) continue;
+      if (normalizeText(directTextOf(el)) !== target) continue;
+      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) bestMatch = el;
+    }
+    return bestMatch;
+  }
+  function findButtonByText(text) {
+    const el = findExactTextElement(text);
+    return el ? toClickable(el) : null;
   }
   function findButtonInScope(text, scope) {
-    const all = scope.querySelectorAll("*");
-    let bestMatch = null;
-    for (const el of all) {
-      const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
-      if (normalizeText(directText) === normalizeText(text)) {
-        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-          bestMatch = el;
+    const el = findExactTextElement(text, scope);
+    return el ? toClickable(el) : null;
+  }
+  function findCardByText(keyword, opts = {}) {
+    const {
+      maxTextLen = 200,
+      minWidth = 100,
+      minHeight = 30,
+      maxCandidates = 30,
+      maxDepth = 10
+    } = opts;
+    if (!keyword) return null;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    const candidates = [];
+    let node;
+    let seen = 0;
+    while ((node = walker.nextNode()) && seen < maxCandidates) {
+      const raw = node.nodeValue;
+      if (!raw || raw.indexOf(keyword) === -1) continue;
+      let el = node.parentElement;
+      if (!el || el.closest && el.closest("#bili-helper-panel")) continue;
+      seen++;
+      for (let depth = 0; el && el !== document.body && depth < maxDepth; depth++) {
+        if ((el.textContent || "").length > maxTextLen) break;
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= minWidth && rect.height >= minHeight) {
+          candidates.push({ el, area: rect.width * rect.height });
+          break;
         }
+        el = el.parentElement;
       }
     }
-    return bestMatch ? toClickable(bestMatch) : null;
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => a.area - b.area);
+    return candidates[0].el;
   }
   function toClickable(el) {
     let cur = el;
@@ -373,6 +347,62 @@
       }
     }
     return null;
+  }
+
+  // src/content/core/wait.js
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  async function waitFor(condition, timeout = 8e3, interval = 300) {
+    const start = Date.now();
+    for (; ; ) {
+      const res = condition();
+      if (res) return res;
+      if (Date.now() - start >= timeout) return null;
+      await sleep(interval);
+    }
+  }
+  function waitForElement(selectors, timeout = 3e4) {
+    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
+    return new Promise((resolve, reject) => {
+      for (const sel of selectorList) {
+        const el = document.querySelector(sel);
+        if (el) return resolve(el);
+      }
+      const observer = new MutationObserver(() => {
+        for (const sel of selectorList) {
+          const el = document.querySelector(sel);
+          if (el) {
+            observer.disconnect();
+            return resolve(el);
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`等待元素超时`));
+      }, timeout);
+    });
+  }
+  function waitForElementByText(keyword, timeout = 6e4) {
+    const check = () => findCardByText(keyword, { maxTextLen: 200, minWidth: 100, minHeight: 30 });
+    const existing = check();
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const obs = new MutationObserver(() => {
+        const el = check();
+        if (el) {
+          obs.disconnect();
+          resolve(el);
+        }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        obs.disconnect();
+        reject(new Error(`等待「${keyword}」超时`));
+      }, timeout);
+    });
   }
 
   // src/content/core/title.js
@@ -1513,7 +1543,7 @@
       onLog(`检测到 ${others.length + 1} 个封面比例入口，补齐其余比例...`);
       for (const inp of others) {
         setFileToInput(inp, coverFile);
-        await sleep(600);
+        await sleep(300);
       }
       onLog("两个比例的封面都已注入");
     } else {
@@ -1744,20 +1774,7 @@
           onLog("视频卡片已出现在队列中");
           await sleep(TIMEOUTS.afterCardAppear);
           onLog("点击视频卡片...");
-          let bestEl = null, bestSize = Infinity;
-          for (const el of document.querySelectorAll("*")) {
-            const text = el.textContent || "";
-            if (text.includes(titleKeyword) && text.length < 200) {
-              const rect = el.getBoundingClientRect();
-              if (rect.width > 100 && rect.height > 30) {
-                const size = rect.width * rect.height;
-                if (size < bestSize) {
-                  bestSize = size;
-                  bestEl = el;
-                }
-              }
-            }
-          }
+          const bestEl = findCardByText(titleKeyword, { maxTextLen: 200, minWidth: 100, minHeight: 30 });
           if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`);
           const clickable = toClickable(bestEl);
           if (clickable && clickable !== bestEl) {
@@ -2036,7 +2053,7 @@
           } finally {
             setIsUploading(false);
           }
-        }, 3e3);
+        }, 800);
       }
     }
   })();

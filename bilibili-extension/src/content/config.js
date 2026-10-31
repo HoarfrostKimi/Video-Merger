@@ -27,7 +27,6 @@ export const SELECTORS = {
   // 标签文案也可能带「*」「（必填）」等后缀，所以选择器放宽、文案改为关键词匹配
   declarationSelect: '.el-select, .bcc-select, [class*="select"]',
   declarationTrigger: '.el-select__wrapper, .el-input__inner, [class*="select__wrapper"], [class*="select-inner"], [class*="trigger"]',
-  declarationFormItem: '.el-form-item, tr, [class*="row"], [class*="item"]',
   // 文件上传入口
   fileInputSelectors: [
     'input[type="file"][accept*="video"]',
@@ -101,10 +100,10 @@ export const TIMEOUTS = {
   submitVerify: 5000, // 投稿生效验证
   dialogGoneMaxTries: 20, // 封面弹窗关闭轮询次数
   dialogGoneInterval: 250, // 封面弹窗关闭轮询间隔(ms)
-  afterFormLoad: 2000, // 表单加载后的稳定等待
+  afterFormLoad: 1000, // 表单加载后的稳定等待（后面还有具体元素等待兜底）
   afterTitleSet: 300, // 标题填写后的校验等待
   afterPartClick: 2000, // 添加分P后等待
-  afterCardAppear: 2000, // 视频卡片出现后等待
+  afterCardAppear: 1000, // 视频卡片出现后等待
   clickDropdownDelay: 500, // 下拉点击后等待
   visibilitySettle: 500, // 可见范围点击后等待
 }

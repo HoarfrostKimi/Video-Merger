@@ -17,43 +17,102 @@ export function findFileInput() {
 }
 
 /** 通过文本内容查找可点击元素 */
-export function findButtonByText(text) {
-  const all = document.querySelectorAll('*')
-
-  // 第一轮：找直接文本节点匹配的最小元素，然后向上找可点击父元素
-  let bestMatch = null
-  for (const el of all) {
-    const directText = Array.from(el.childNodes)
-      .filter(n => n.nodeType === 3)
-      .map(n => n.textContent)
-      .join('')
-      .trim()
-    if (normalizeText(directText) === normalizeText(text)) {
-      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-        bestMatch = el
-      }
-    }
+/** 元素自身的直接文本（不含子元素文本） */
+function directTextOf(el) {
+  let s = ''
+  for (const n of el.childNodes) {
+    if (n.nodeType === 3) s += n.nodeValue
   }
-  return bestMatch ? toClickable(bestMatch) : null
+  return s.trim()
+}
+
+/**
+ * 按「直接文本」精确查找元素：只扫文本节点（TreeWalker），不做全页元素遍历。
+ *
+ * 性能要点（这里是投稿页最大的热点）：
+ * 旧实现是 querySelectorAll('*') + 给每个元素建一次 childNodes 数组，投稿页上万节点
+ * 一次要几十毫秒。而 findButtonByText 会被轮询高频调用（等「立即投稿」最长 30s、
+ * 等封面「完成」十几秒），全页遍历等于持续抢占主线程，连 B站 自己的上传进度都会被拖慢。
+ * TreeWalker 只读 nodeValue，代价与文本节点数成正比。
+ *
+ * @param {string} text 目标文案（比较前统一去空白）
+ * @param {Element|Document} [root=document.body] 查找范围
+ * @returns {Element|null} 匹配到的最小元素（未转可点击父元素）
+ */
+export function findExactTextElement(text, root) {
+  const target = normalizeText(text)
+  if (!target) return null
+  const scope = root || document.body
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null)
+  let bestMatch = null
+  let node
+  while ((node = walker.nextNode())) {
+    const raw = node.nodeValue
+    if (!raw || !raw.trim()) continue
+    // 先做最便宜的原始包含判断；文本明显长于目标且不包含目标，直接跳过
+    if (!raw.includes(target) && raw.trim().length > target.length + 8) continue
+    const el = node.parentElement
+    if (!el || (el.closest && el.closest('#bili-helper-panel'))) continue
+    // 元素级拼接二次校验：兼容「确 定」被拆成多个文本节点的情况
+    if (normalizeText(directTextOf(el)) !== target) continue
+    if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) bestMatch = el
+  }
+  return bestMatch
+}
+
+/** 通过文本内容查找可点击元素 */
+export function findButtonByText(text) {
+  const el = findExactTextElement(text)
+  return el ? toClickable(el) : null
 }
 
 /** 在指定 scope 内按直接文本节点查找可点击元素 */
 export function findButtonInScope(text, scope) {
-  const all = scope.querySelectorAll('*')
-  let bestMatch = null
-  for (const el of all) {
-    const directText = Array.from(el.childNodes)
-      .filter(n => n.nodeType === 3)
-      .map(n => n.textContent)
-      .join('')
-      .trim()
-    if (normalizeText(directText) === normalizeText(text)) {
-      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
-        bestMatch = el
+  const el = findExactTextElement(text, scope)
+  return el ? toClickable(el) : null
+}
+
+/**
+ * 按关键词找「像卡片/区块」的最内层可见元素（用于定位视频卡片、文件名条目等）。
+ * 同样走 TreeWalker，避免 querySelectorAll('*') 全页遍历。
+ * @param {string} keyword 关键词（原始包含匹配）
+ * @param {object} [opts]
+ * @param {number} [opts.maxTextLen=200] 候选元素文本长度上限（排除大容器）
+ * @param {number} [opts.minWidth=100] 命中区域最小宽度
+ * @param {number} [opts.minHeight=30] 命中区域最小高度
+ * @param {number} [opts.maxCandidates=30] 最多考察多少个命中文本节点
+ * @param {number} [opts.maxDepth=10] 从文本元素向上最多爬几层
+ * @returns {Element|null} 面积最小的那层容器（最贴近"卡片内文字"）
+ */
+export function findCardByText(keyword, opts = {}) {
+  const {
+    maxTextLen = 200, minWidth = 100, minHeight = 30,
+    maxCandidates = 30, maxDepth = 10,
+  } = opts
+  if (!keyword) return null
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null)
+  const candidates = []
+  let node
+  let seen = 0
+  while ((node = walker.nextNode()) && seen < maxCandidates) {
+    const raw = node.nodeValue
+    if (!raw || raw.indexOf(keyword) === -1) continue
+    let el = node.parentElement
+    if (!el || (el.closest && el.closest('#bili-helper-panel'))) continue
+    seen++
+    for (let depth = 0; el && el !== document.body && depth < maxDepth; depth++) {
+      if ((el.textContent || '').length > maxTextLen) break // 已到外层大容器
+      const rect = el.getBoundingClientRect()
+      if (rect.width >= minWidth && rect.height >= minHeight) {
+        candidates.push({ el, area: rect.width * rect.height })
+        break
       }
+      el = el.parentElement
     }
   }
-  return bestMatch ? toClickable(bestMatch) : null
+  if (!candidates.length) return null
+  candidates.sort((a, b) => a.area - b.area)
+  return candidates[0].el
 }
 
 /** 从文本元素向上找到可点击的父元素 */
@@ -124,48 +183,6 @@ export function dispatchFullClickSequence(el) {
   try { el.dispatchEvent(new PointerEvent('pointerup', pointerOpts)) } catch (e) { /* 同上 */ }
   el.dispatchEvent(new MouseEvent('mouseup', opts))
   el.dispatchEvent(new MouseEvent('click', opts))
-}
-
-/**
- * 通过文本查找并点击下拉选项。
- * 文案比较用 normalizeText：B站选项常带空格/换行，且改版会微调措辞
- * （「内容无需标注」→「无需标注」），所以传数组、按「任一命中」处理。
- *
- * 两处关键实现细节（2026-10 实测）：
- *   1. 必须用 dispatchFullClickSequence（含 mousedown/mouseup）。
- *      纯 el.click() 和只有 pointer 事件的序列都点不动 B站自研下拉的选项。
- *   2. 命中多个元素时取面积最小的（最内层）。`[class*="option"]` 很容易同时命中
- *      整个选项列表容器，点容器等于点空白，同样选不中。
- *
- * @param {string|string[]} texts 目标文案
- * @param {number} [maxLen=30] 选项文本长度上限，避免命中含关键词的长说明段落
- */
-export function clickDropdownOption(texts, maxLen = 30) {
-  const targets = (Array.isArray(texts) ? texts : [texts]).map(normalizeText).filter(Boolean)
-  if (!targets.length) return false
-
-  // 命中文本的长度上限：目标文案长度 + 4。
-  // 超过这个长度的基本都是「装着所有选项的容器」（textContent 会把全部选项拼起来），
-  // 点容器等于点空白 —— 这正是「命中了下拉项却选不中」的真正原因。
-  const maxHitLen = Math.min(maxLen, Math.min(...targets.map((t) => t.length)) + 4)
-
-  const hits = []
-  for (const item of document.querySelectorAll(SELECTORS.dropdownItems)) {
-    const t = normalizeText(item.textContent)
-    if (!t || t.length > maxHitLen) continue
-    const exact = targets.includes(t)
-    const partial = !exact && targets.some((x) => t.includes(x))
-    if (!exact && !partial) continue
-    const rect = item.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) continue
-    hits.push({ item, exact, len: t.length, area: rect.width * rect.height })
-  }
-  if (!hits.length) return false
-
-  // 严格相等 > 文本更短（更接近选项本身） > 面积更小
-  hits.sort((a, b) => (Number(b.exact) - Number(a.exact)) || (a.len - b.len) || (a.area - b.area))
-  dispatchFullClickSequence(hits[0].item)
-  return true
 }
 
 /**

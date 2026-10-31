@@ -429,7 +429,7 @@ export async function stepSetCover(file, onLog) {
     onLog(`检测到 ${others.length + 1} 个封面比例入口，补齐其余比例...`)
     for (const inp of others) {
       setFileToInput(inp, coverFile)
-      await sleep(600)
+      await sleep(300)
     }
     onLog('两个比例的封面都已注入')
   } else {

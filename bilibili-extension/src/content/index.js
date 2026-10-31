@@ -107,7 +107,7 @@ import { batchUpload } from './flow.js'
         } finally {
           setIsUploading(false)
         }
-      }, 3000)
+      }, 800)
     }
   }
 })()

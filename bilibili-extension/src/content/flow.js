@@ -1,6 +1,6 @@
 // flow.js - 主流程编排：uploadAndSubmit / batchUpload
 import { sleep, waitFor, waitForElement, waitForElementByText } from './core/wait.js'
-import { findButtonByText, toClickable } from './core/find.js'
+import { findButtonByText, toClickable, findCardByText } from './core/find.js'
 import { parseTitle } from './core/title.js'
 import { runStep, recordError, setCurrentStep } from './core/errorReport.js'
 import { stepUploadFile } from './steps/upload.js'
@@ -128,19 +128,9 @@ export async function batchUpload(files, onLog, targetText) {
         onLog('视频卡片已出现在队列中')
         await sleep(TIMEOUTS.afterCardAppear)
 
-        // 点击视频卡片进入编辑页面
+        // 点击视频卡片进入编辑页面（TreeWalker 定位，避免全页遍历）
         onLog('点击视频卡片...')
-        let bestEl = null, bestSize = Infinity
-        for (const el of document.querySelectorAll('*')) {
-          const text = el.textContent || ''
-          if (text.includes(titleKeyword) && text.length < 200) {
-            const rect = el.getBoundingClientRect()
-            if (rect.width > 100 && rect.height > 30) {
-              const size = rect.width * rect.height
-              if (size < bestSize) { bestSize = size; bestEl = el }
-            }
-          }
-        }
+        const bestEl = findCardByText(titleKeyword, { maxTextLen: 200, minWidth: 100, minHeight: 30 })
         if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`)
 
         const clickable = toClickable(bestEl)

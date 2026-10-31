@@ -1,4 +1,5 @@
 // core/wait.js - 等待与延时工具
+import { findCardByText } from './find.js'
 
 /** 延时 */
 export function sleep(ms) {
@@ -49,16 +50,10 @@ export function waitForElement(selectors, timeout = 30000) {
 
 /** 等待 DOM 中出现包含指定文本的可见元素 */
 export function waitForElementByText(keyword, timeout = 60000) {
-  const check = () => {
-    for (const el of document.querySelectorAll('*')) {
-      const text = el.textContent || ''
-      if (text.includes(keyword) && text.length < 200) {
-        const rect = el.getBoundingClientRect()
-        if (rect.width > 100 && rect.height > 30) return el
-      }
-    }
-    return null
-  }
+  // 查找逻辑走 TreeWalker 文本节点扫描，不再全页 querySelectorAll('*')。
+  // 上传期间 DOM 每秒变动几十次，旧写法每次变动都全页遍历一遍并强制同步布局，
+  // 会把主线程吃满、连 B站 自己的上传进度都拖慢。
+  const check = () => findCardByText(keyword, { maxTextLen: 200, minWidth: 100, minHeight: 30 })
   const existing = check()
   if (existing) return Promise.resolve(existing)
   return new Promise((resolve, reject) => {
