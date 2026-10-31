@@ -4,12 +4,19 @@ import { logBuffer, MAX_LOG_BUFFER, setIsUploading, recordError, formatReportMar
 import { parseTitle } from '../core/title.js'
 import { STORAGE_KEYS } from '../config.js'
 
+/**
+ * 版本标记：显示在面板标题右侧 + 每次运行的第一行日志。
+ * 用途只有一个——确认扩展到底有没有被重新加载。
+ * 标题上看不到这个标记 = 浏览器里跑的还是旧代码，改什么都没用。
+ */
+const BUILD_TAG = 'v7'
+
 export function createPanel() {
   const panel = document.createElement('div')
   panel.id = 'bili-helper-panel'
   panel.innerHTML = `
     <div class="bili-helper-header">
-      <span class="bili-helper-title">B站投稿助手</span>
+      <span class="bili-helper-title">B站投稿助手 · ${BUILD_TAG}</span>
       <button class="bili-helper-minimize" id="bili-helper-min">—</button>
     </div>
     <div class="bili-helper-body" id="bili-helper-body">
@@ -135,6 +142,8 @@ export function createPanel() {
       logContent.textContent += msg + '\n'
       logContent.scrollTop = logContent.scrollHeight
     }
+    // 第一行永远打版本标记，用来确认跑的是不是重新加载后的代码
+    onLog(`B站投稿助手 ${BUILD_TAG}`)
 
     setIsUploading(true)
     try {

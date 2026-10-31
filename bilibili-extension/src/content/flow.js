@@ -1,40 +1,13 @@
 // flow.js - 主流程编排：uploadAndSubmit / batchUpload
-import { sleep, waitFor, waitForElement, waitForElementByText, waitForStable } from './core/wait.js'
-import { findButtonByText, findVisibleTextElement, toClickable } from './core/find.js'
+import { sleep, waitFor, waitForElement, waitForElementByText } from './core/wait.js'
+import { findButtonByText, toClickable } from './core/find.js'
 import { parseTitle } from './core/title.js'
 import { runStep, recordError, setCurrentStep } from './core/errorReport.js'
 import { stepUploadFile } from './steps/upload.js'
 import { stepWaitForForm, stepSetTitle, stepSetDeclaration, stepSetVisibility } from './steps/form.js'
 import { stepSetCover } from './steps/cover.js'
 import { stepSubmit } from './steps/submit.js'
-import { runHealthCheck, renderHealthBanner } from './core/healthCheck.js'
 import { BUTTON_LABELS, SELECTORS, TIMEOUTS, VIDEO_EXTENSIONS } from './config.js'
-
-// 每批次只做一次页面结构自检（跨视频复用结果）
-let healthChecked = false
-
-/**
- * 进入编辑页后自检关键锚点：B站改版时提前预警，而不是跑到封面那步才发现。
- * 先等 DOM 稳定；仍有缺失再宽限 1.5s 复查一次，避免表单渲染到一半误报。
- */
-async function checkPageHealthOnce(onLog) {
-  if (healthChecked) return
-  healthChecked = true
-  await waitForStable({ maxMs: 800 })
-  let result = runHealthCheck()
-  if (!result.ok) {
-    await sleep(1500)
-    result = runHealthCheck()
-  }
-  renderHealthBanner(result)
-  if (result.ok) {
-    onLog('页面结构自检通过')
-  } else if (result.criticalMissing.length) {
-    onLog(`⚠️ 页面结构自检失败：未找到 ${result.criticalMissing.join('、')}，B站可能已改版`)
-  } else {
-    onLog(`提示: 页面结构自检缺失 ${result.missing.join('、')}（有备用方案，可继续）`)
-  }
-}
 
 /**
  * 上传并自动投稿一个视频
@@ -50,7 +23,6 @@ export async function uploadAndSubmit(file, onLog, targetText) {
 
   // Step 2: 等待表单加载
   await runStep('stepWaitForForm', stepWaitForForm, onLog)
-  await checkPageHealthOnce(onLog)
 
   // Step 3: 填写标题
   await runStep('stepSetTitle', stepSetTitle, title, onLog)
@@ -77,7 +49,6 @@ export async function uploadAndSubmit(file, onLog, targetText) {
  */
 export async function batchUpload(files, onLog, targetText) {
   onLog('提示: 投稿期间请保持本页面可见，最小化窗口会导致浏览器节流、提交可能卡住')
-  healthChecked = false // 每批次重新自检一次
   for (let i = 0; i < files.length; i++) {
     const file = files[i]
     // 重置当前步骤标记：批次内非 runStep 错误（如找不到按钮）也能定位到具体第几个
@@ -155,12 +126,21 @@ export async function batchUpload(files, onLog, targetText) {
         const titleKeyword = file.name.replace(/\.mp4$/i, '')
         await waitForElementByText(titleKeyword, TIMEOUTS.waitForFormEditor)
         onLog('视频卡片已出现在队列中')
-        // 等卡片渲染稳定（上限保持 2s；页面快时通常 150~300ms 就继续）
-        await waitForStable({ maxMs: TIMEOUTS.afterCardAppear })
+        await sleep(TIMEOUTS.afterCardAppear)
 
         // 点击视频卡片进入编辑页面
         onLog('点击视频卡片...')
-        const bestEl = findVisibleTextElement(titleKeyword)
+        let bestEl = null, bestSize = Infinity
+        for (const el of document.querySelectorAll('*')) {
+          const text = el.textContent || ''
+          if (text.includes(titleKeyword) && text.length < 200) {
+            const rect = el.getBoundingClientRect()
+            if (rect.width > 100 && rect.height > 30) {
+              const size = rect.width * rect.height
+              if (size < bestSize) { bestSize = size; bestEl = el }
+            }
+          }
+        }
         if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`)
 
         const clickable = toClickable(bestEl)
@@ -180,8 +160,7 @@ export async function batchUpload(files, onLog, targetText) {
         // 等待编辑页面加载
         onLog('等待编辑页面加载...')
         await waitForElement(SELECTORS.titleAny.slice(0, 2), TIMEOUTS.waitForFormEditor)
-        // 等编辑页渲染稳定（上限保持 2s）
-        await waitForStable({ maxMs: TIMEOUTS.afterFormLoad })
+        await sleep(TIMEOUTS.afterFormLoad)
         onLog('已进入编辑页面')
 
         // 填表

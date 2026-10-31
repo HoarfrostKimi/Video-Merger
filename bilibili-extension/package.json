@@ -6,12 +6,9 @@
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
-    "watch": "node esbuild.config.mjs --watch",
-    "test": "vitest run"
+    "watch": "node esbuild.config.mjs --watch"
   },
   "devDependencies": {
-    "esbuild": "^0.21.5",
-    "happy-dom": "^21.0.4",
-    "vitest": "^2.1.0"
+    "esbuild": "^0.21.5"
   }
 }

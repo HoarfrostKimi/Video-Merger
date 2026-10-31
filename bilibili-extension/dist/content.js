@@ -1,5 +1,70 @@
 // content.js - B站投稿助手（由 src/ 构建生成，请勿直接修改本文件）
 (() => {
+  // src/content/core/wait.js
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  async function waitFor(condition, timeout = 8e3, interval = 300) {
+    const start = Date.now();
+    for (; ; ) {
+      const res = condition();
+      if (res) return res;
+      if (Date.now() - start >= timeout) return null;
+      await sleep(interval);
+    }
+  }
+  function waitForElement(selectors, timeout = 3e4) {
+    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
+    return new Promise((resolve, reject) => {
+      for (const sel of selectorList) {
+        const el = document.querySelector(sel);
+        if (el) return resolve(el);
+      }
+      const observer = new MutationObserver(() => {
+        for (const sel of selectorList) {
+          const el = document.querySelector(sel);
+          if (el) {
+            observer.disconnect();
+            return resolve(el);
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`等待元素超时`));
+      }, timeout);
+    });
+  }
+  function waitForElementByText(keyword, timeout = 6e4) {
+    const check = () => {
+      for (const el of document.querySelectorAll("*")) {
+        const text = el.textContent || "";
+        if (text.includes(keyword) && text.length < 200) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 30) return el;
+        }
+      }
+      return null;
+    };
+    const existing = check();
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const obs = new MutationObserver(() => {
+        const el = check();
+        if (el) {
+          obs.disconnect();
+          resolve(el);
+        }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        obs.disconnect();
+        reject(new Error(`等待「${keyword}」超时`));
+      }, timeout);
+    });
+  }
+
   // src/content/config.js
   var SELECTORS = {
     // 标题输入框（主稿件标题）
@@ -23,8 +88,10 @@
     visibilityContainer: ".check-radio-v2-container",
     visibilityBox: ".check-radio-v2-box",
     // 创作声明下拉
-    declarationSelect: ".el-select",
-    declarationTrigger: ".el-select__wrapper, .el-input__inner",
+    // 2026 改版：该项改为必填，组件可能不再用 el-select（B站自研 bcc-* 组件），
+    // 标签文案也可能带「*」「（必填）」等后缀，所以选择器放宽、文案改为关键词匹配
+    declarationSelect: '.el-select, .bcc-select, [class*="select"]',
+    declarationTrigger: '.el-select__wrapper, .el-input__inner, [class*="select__wrapper"], [class*="select-inner"], [class*="trigger"]',
     declarationFormItem: '.el-form-item, tr, [class*="row"], [class*="item"]',
     // 文件上传入口
     fileInputSelectors: [
@@ -67,8 +134,13 @@
     coverFallbackEntry: ["封面", "* 封面", "添加主封面", "添加封面"]
   };
   var TEXT_KEYWORDS = {
-    declarationTarget: "内容无需标注",
-    declarationLabel: "创作声明",
+    // 目标选项（任一命中即可）。2026 改版把「内容无需标注」缩成「无需标注」，
+    // 早期版本还有「不添加创作声明」，都留着，避免每次改文案就得改代码
+    declarationTarget: ["内容无需标注", "无需标注", "不添加创作声明", "内容无需添加声明"],
+    // 表单项标签（含「必填」标记时也能命中）
+    declarationLabel: ["创作声明", "创作者声明"],
+    // 标签与目标文案的最大字符数：超过这个长度的元素视为说明段落，不当成标签/选项
+    declarationTextLimit: 16,
     coverFeatures: ["上传封面", "拖拽图片", "更换封面", "封面制作", "封面编辑", "封面裁剪", "裁剪封面"],
     submitProgress: ["投稿中", "正在提交"]
   };
@@ -136,71 +208,31 @@
     }
     return null;
   }
-  function directTextOf(el) {
-    let s = "";
-    for (const n of el.childNodes) {
-      if (n.nodeType === 3) s += n.nodeValue;
-    }
-    return s.trim();
-  }
-  function findExactTextElement(text, root) {
-    const target = normalizeText(text);
-    if (!target) return null;
-    const scope = root || document.body;
-    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null);
-    let bestMatch = null;
-    let node;
-    while (node = walker.nextNode()) {
-      const raw = node.nodeValue;
-      if (!raw || !raw.trim()) continue;
-      if (!raw.includes(target) && raw.trim().length > target.length + 8) continue;
-      const el = node.parentElement;
-      if (!el || el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel")) continue;
-      if (normalizeText(directTextOf(el)) !== target) continue;
-      if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) bestMatch = el;
-    }
-    return bestMatch;
-  }
   function findButtonByText(text) {
-    const el = findExactTextElement(text, document.body);
-    return el ? toClickable(el) : null;
-  }
-  function findButtonInScope(text, scope) {
-    const el = findExactTextElement(text, scope);
-    return el ? toClickable(el) : null;
-  }
-  function findVisibleTextElement(keyword, opts = {}) {
-    const {
-      maxTextLen = 200,
-      minWidth = 100,
-      minHeight = 30,
-      maxCandidates = 30,
-      maxDepth = 10
-    } = opts;
-    if (!keyword) return null;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-    const candidates = [];
-    let node;
-    let seen = 0;
-    while ((node = walker.nextNode()) && seen < maxCandidates) {
-      const raw = node.nodeValue;
-      if (!raw || raw.indexOf(keyword) === -1) continue;
-      let el = node.parentElement;
-      if (!el || el.closest && el.closest("#bili-helper-panel")) continue;
-      seen++;
-      for (let depth = 0; el && el !== document.body && depth < maxDepth; depth++) {
-        if ((el.textContent || "").length > maxTextLen) break;
-        const rect = el.getBoundingClientRect();
-        if (rect.width >= minWidth && rect.height >= minHeight) {
-          candidates.push({ el, area: rect.width * rect.height });
-          break;
+    const all = document.querySelectorAll("*");
+    let bestMatch = null;
+    for (const el of all) {
+      const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
+      if (normalizeText(directText) === normalizeText(text)) {
+        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
+          bestMatch = el;
         }
-        el = el.parentElement;
       }
     }
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => a.area - b.area);
-    return candidates[0].el;
+    return bestMatch ? toClickable(bestMatch) : null;
+  }
+  function findButtonInScope(text, scope) {
+    const all = scope.querySelectorAll("*");
+    let bestMatch = null;
+    for (const el of all) {
+      const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
+      if (normalizeText(directText) === normalizeText(text)) {
+        if (!bestMatch || el.childNodes.length < bestMatch.childNodes.length) {
+          bestMatch = el;
+        }
+      }
+    }
+    return bestMatch ? toClickable(bestMatch) : null;
   }
   function toClickable(el) {
     let cur = el;
@@ -238,29 +270,28 @@
     }
     el.dispatchEvent(new MouseEvent("click", opts));
   }
-  function clickDropdownOption(text) {
-    const items = document.querySelectorAll(SELECTORS.dropdownItems);
-    for (const item of items) {
-      if (item.textContent.trim() === text || item.textContent.trim().includes(text)) {
-        const rect = item.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          item.click();
-          return true;
-        }
-      }
+  function dispatchFullClickSequence(el) {
+    const rect = el.getBoundingClientRect();
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      composed: true,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2
+    };
+    const pointerOpts = { ...opts, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    try {
+      el.dispatchEvent(new PointerEvent("pointerdown", pointerOpts));
+    } catch (e) {
     }
-    return false;
-  }
-  function isVisibleInTree(el, maxDepth = 12) {
-    let node = el;
-    let depth = 0;
-    while (node && node !== document.body && depth < maxDepth) {
-      const style = window.getComputedStyle(node);
-      if (style.display === "none" || style.visibility === "hidden") return false;
-      node = node.parentElement;
-      depth++;
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    try {
+      el.dispatchEvent(new PointerEvent("pointerup", pointerOpts));
+    } catch (e) {
     }
-    return true;
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
+    el.dispatchEvent(new MouseEvent("click", opts));
   }
   function findCoverDialog() {
     const isSelfPanel = (el) => el && (el.id === "bili-helper-panel" || el.closest && el.closest("#bili-helper-panel"));
@@ -274,12 +305,13 @@
         if (cls.includes("dialog") || cls.includes("modal")) dialogRoot = node;
         node = node.parentElement;
       }
-      if (dialogRoot && isVisibleInTree(dialogRoot)) return dialogRoot;
+      if (dialogRoot) {
+        const style = window.getComputedStyle(dialogRoot);
+        if (style.display !== "none" && style.visibility !== "hidden") return dialogRoot;
+      }
     }
-    for (const known of document.querySelectorAll(SELECTORS.coverDialogKnown.join(", "))) {
-      if (isSelfPanel(known)) continue;
-      if (isVisibleInTree(known)) return known;
-    }
+    const known = document.querySelector(SELECTORS.coverDialogKnown.join(", "));
+    if (known && !isSelfPanel(known)) return known;
     const candidates = [];
     const imgInputs = document.querySelectorAll(SELECTORS.imageFileInput);
     for (const inp of imgInputs) {
@@ -294,7 +326,7 @@
         if (isSelfPanel(el)) continue;
         const text = el.textContent || "";
         if (text.length < 500 && (TEXT_KEYWORDS.coverFeatures.some((kw) => text.includes(kw)) || text.includes("封面") && text.includes("裁剪"))) {
-          if (isVisibleInTree(el)) candidates.push(el);
+          candidates.push(el);
         }
       }
     }
@@ -303,7 +335,7 @@
       for (const cvs of canvases) {
         if (isSelfPanel(cvs)) continue;
         const style = window.getComputedStyle(cvs);
-        if (style.display !== "none" && cvs.width > 100 && cvs.height > 100 && isVisibleInTree(cvs)) {
+        if (style.display !== "none" && cvs.width > 100 && cvs.height > 100) {
           candidates.push(cvs);
         }
       }
@@ -335,101 +367,12 @@
       if (style.display === "none" || style.visibility === "hidden") continue;
       const zIndex = parseInt(style.zIndex) || 0;
       if (zIndex < 50) continue;
-      if (!isVisibleInTree(ov)) continue;
       const text = ov.textContent || "";
       if (text.includes("封面") || text.includes("裁剪") || ov.querySelector('input[type="file"], canvas, img[src^="blob:"]')) {
         return ov;
       }
     }
     return null;
-  }
-
-  // src/content/core/wait.js
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-  function waitForStable({ quietMs = 150, maxMs = 2e3, minMs = 100 } = {}) {
-    return new Promise((resolve) => {
-      const start = Date.now();
-      let lastChange = start;
-      let done = false;
-      let timer = null;
-      let tick = null;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        obs.disconnect();
-        clearTimeout(timer);
-        clearInterval(tick);
-        resolve();
-      };
-      const obs = new MutationObserver(() => {
-        lastChange = Date.now();
-      });
-      try {
-        obs.observe(document.body, { childList: true, subtree: true, characterData: true });
-      } catch (e) {
-        setTimeout(finish, minMs);
-        return;
-      }
-      timer = setTimeout(finish, maxMs);
-      tick = setInterval(() => {
-        const now = Date.now();
-        if (now - start < minMs) return;
-        if (now - lastChange >= quietMs) finish();
-      }, 50);
-    });
-  }
-  async function waitFor(condition, timeout = 8e3, interval = 300) {
-    const start = Date.now();
-    for (; ; ) {
-      const res = condition();
-      if (res) return res;
-      if (Date.now() - start >= timeout) return null;
-      await sleep(interval);
-    }
-  }
-  function waitForElement(selectors, timeout = 3e4) {
-    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
-    return new Promise((resolve, reject) => {
-      for (const sel of selectorList) {
-        const el = document.querySelector(sel);
-        if (el) return resolve(el);
-      }
-      const observer = new MutationObserver(() => {
-        for (const sel of selectorList) {
-          const el = document.querySelector(sel);
-          if (el) {
-            observer.disconnect();
-            return resolve(el);
-          }
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(`等待元素超时`));
-      }, timeout);
-    });
-  }
-  function waitForElementByText(keyword, timeout = 6e4) {
-    const check = () => findVisibleTextElement(keyword);
-    const existing = check();
-    if (existing) return Promise.resolve(existing);
-    return new Promise((resolve, reject) => {
-      const obs = new MutationObserver(() => {
-        const el = check();
-        if (el) {
-          obs.disconnect();
-          resolve(el);
-        }
-      });
-      obs.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        obs.disconnect();
-        reject(new Error(`等待「${keyword}」超时`));
-      }, timeout);
-    });
   }
 
   // src/content/core/title.js
@@ -583,10 +526,38 @@
   }
 
   // src/content/steps/form.js
+  var toArray = (v) => (Array.isArray(v) ? v : [v]).filter(Boolean);
+  function isVisible(el) {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    let node = el;
+    for (let i = 0; i < 10 && node && node !== document.body; i++) {
+      const s = window.getComputedStyle(node);
+      if (s.display === "none" || s.visibility === "hidden") return false;
+      node = node.parentElement;
+    }
+    return true;
+  }
+  function findLabelElement(labels, maxLen) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    let node;
+    let best = null;
+    while (node = walker.nextNode()) {
+      const t = normalizeText(node.nodeValue);
+      if (!t || t.length > maxLen) continue;
+      if (!labels.some((l) => t.includes(normalizeText(l)))) continue;
+      const el = node.parentElement;
+      if (!el || el.closest && el.closest("#bili-helper-panel")) continue;
+      if (!isVisible(el)) continue;
+      if (!best || (el.textContent || "").length < (best.textContent || "").length) best = el;
+    }
+    return best;
+  }
   async function stepWaitForForm(onLog) {
     onLog("等待表单加载...");
     await waitForElement(SELECTORS.titleAny, TIMEOUTS.waitForForm);
-    await waitForStable({ maxMs: TIMEOUTS.afterFormLoad });
+    await sleep(TIMEOUTS.afterFormLoad);
     onLog("表单已加载，开始设置");
   }
   async function stepSetTitle(title, onLog) {
@@ -613,10 +584,10 @@
       input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
     };
     applyTitle();
-    await waitForStable({ quietMs: 80, maxMs: TIMEOUTS.afterTitleSet, minMs: 60 });
+    await sleep(TIMEOUTS.afterTitleSet);
     if ((input.value || "").trim() !== title.trim()) {
       applyTitle();
-      await waitForStable({ quietMs: 80, maxMs: TIMEOUTS.afterTitleSet, minMs: 60 });
+      await sleep(TIMEOUTS.afterTitleSet);
     }
     if ((input.value || "").trim() !== title.trim()) {
       onLog(`警告: 标题填写后未生效（当前值: ${input.value || "(空)"}），请检查标题框是否被锁定`);
@@ -625,35 +596,163 @@
     }
   }
   async function stepSetDeclaration(onLog) {
+    const labels = toArray(TEXT_KEYWORDS.declarationLabel || "创作声明");
+    const targets = toArray(TEXT_KEYWORDS.declarationTarget || "无需标注");
+    const maxLen = TEXT_KEYWORDS.declarationTextLimit || 16;
     onLog("设置创作声明...");
-    async function trySelectDeclaration(selectEl) {
-      const trigger = selectEl.querySelector(SELECTORS.declarationTrigger);
-      if (!trigger) return false;
-      trigger.click();
-      return !!await waitFor(
-        () => clickDropdownOption(TEXT_KEYWORDS.declarationTarget),
-        TIMEOUTS.clickDropdownDelay + 1e3,
-        100
-      );
+    const dbg = (...args) => {
+      try {
+        console.log("[声明诊断]", ...args);
+      } catch (e) {
+      }
+    };
+    const descEl = (el) => {
+      if (!el) return "null";
+      const cls = (el.className || "").toString().trim().replace(/\s+/g, ".");
+      const r = el.getBoundingClientRect();
+      const txt = (el.textContent || "").replace(/\s+/g, "").slice(0, 20);
+      return `<${el.tagName.toLowerCase()}${cls ? "." + cls.slice(0, 40) : ""}> ${Math.round(r.width)}x${Math.round(r.height)} "${txt}"`;
+    };
+    dbg("开始", { labels, targets, maxLen });
+    const labelEl = findLabelElement(labels, maxLen);
+    dbg("标签", descEl(labelEl));
+    if (!labelEl) {
+      onLog("未找到「创作声明」标签，跳过（可手动设置）");
+      return;
     }
-    for (const label of document.querySelectorAll("span, label, div")) {
-      if (label.textContent.trim() === TEXT_KEYWORDS.declarationLabel) {
-        const parent = label.closest(SELECTORS.declarationFormItem) || label.parentElement;
-        const targetSelect = parent?.querySelector(`${SELECTORS.declarationSelect}, select, [class*="select"]`);
-        if (targetSelect && await trySelectDeclaration(targetSelect)) {
-          return onLog("创作声明已设置为「内容无需标注」");
+    let row = labelEl;
+    let selectEl = null;
+    for (let i2 = 0; i2 < 6 && row && row !== document.body; i2++) {
+      selectEl = row.querySelector(SELECTORS.declarationSelect);
+      if (selectEl) break;
+      row = row.parentElement;
+    }
+    const scope = row && row !== document.body ? row : labelEl.parentElement;
+    dbg("下拉", descEl(selectEl), "| 行容器", descEl(scope));
+    const valueShown = () => {
+      if (!scope) return false;
+      const norms = targets.map(normalizeText);
+      const hit = (v) => norms.some((x) => v === x || v.includes(x));
+      for (const inp of scope.querySelectorAll("input, textarea")) {
+        const v = normalizeText(inp.value || "");
+        if (v && hit(v)) return true;
+      }
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null);
+      let node;
+      while (node = walker.nextNode()) {
+        const t = normalizeText(node.nodeValue);
+        if (!t || t.length > maxLen) continue;
+        if (!hit(t)) continue;
+        if (!isVisible(node.parentElement)) continue;
+        return true;
+      }
+      return false;
+    };
+    if (valueShown()) {
+      dbg("行内已有目标值，跳过");
+      onLog("创作声明已是目标状态，无需操作");
+      return;
+    }
+    const findOption = () => {
+      const norms = targets.map(normalizeText);
+      const maxHitLen = Math.min(maxLen, Math.min(...norms.map((t) => t.length)) + 4);
+      let best = null;
+      for (const root of [scope, document]) {
+        if (!root) continue;
+        for (const el of root.querySelectorAll('[class*="option"], li')) {
+          const cls = (el.className || "").toString();
+          if (/hover-tips|tooltip|wrapper/i.test(cls)) continue;
+          if (el.closest && el.closest("#bili-helper-panel")) continue;
+          if (labelEl.contains(el)) continue;
+          const t = normalizeText(el.textContent);
+          if (!t || t.length > maxHitLen) continue;
+          const exact = norms.includes(t);
+          if (!exact && !norms.some((x) => t.includes(x))) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || !isVisible(el)) continue;
+          const looksOption = /bcc-option|option-item|(^|[-_ ])option([-_ ]|$)/i.test(cls) ? 0 : 1;
+          const score = (exact ? 0 : 1e3) + looksOption * 10 + t.length + el.childElementCount * 0.1;
+          if (!best || score < best.score) best = { el, score };
         }
-        break;
+        if (best) return best.el;
+      }
+      return null;
+    };
+    const optionStillVisible = () => !!findOption();
+    const isApplied = async () => {
+      const closed = await waitFor(() => optionStillVisible() ? null : true, 1500, 100);
+      if (!closed) return false;
+      return !!await waitFor(valueShown, 600, 100);
+    };
+    const pickAndApply = async () => {
+      let opt = await waitFor(findOption, 1e3, 100);
+      if (!opt) return "no-option";
+      dbg("  命中选项", descEl(opt));
+      dispatchFullClickSequence(opt);
+      if (await isApplied()) return "ok";
+      opt = findOption();
+      if (!opt) return "closed-but-empty";
+      opt.click();
+      return await isApplied() ? "ok" : "failed";
+    };
+    const tryOpenAndPick = async (opener, useSequence) => {
+      if (useSequence) dispatchFullClickSequence(opener);
+      else opener.click();
+      const r = await pickAndApply();
+      const msg = r === "ok" ? "成功" : r === "no-option" ? "没找到选项（下拉没打开）" : r === "closed-but-empty" ? "点了，菜单关了但值没写进去" : "点了，值仍未生效";
+      dbg(`  → ${msg}`);
+      return r === "ok";
+    };
+    const openers = [];
+    if (selectEl) openers.push(selectEl.querySelector(SELECTORS.declarationTrigger), selectEl);
+    openers.push(labelEl, scope, scope && scope.parentElement);
+    const deadline = Date.now() + 12e3;
+    let i = 0;
+    for (const opener of openers) {
+      i++;
+      if (!opener || Date.now() > deadline) continue;
+      dbg(`尝试 #${i}`, descEl(opener));
+      if (await tryOpenAndPick(opener, false)) {
+        onLog("创作声明已设置为「内容无需标注」");
+        return;
+      }
+      if (Date.now() > deadline) break;
+      dbg(`尝试 #${i} 指针序列`, descEl(opener));
+      if (await tryOpenAndPick(opener, true)) {
+        onLog("创作声明已设置为「内容无需标注」");
+        return;
       }
     }
-    for (const sel of document.querySelectorAll(SELECTORS.declarationSelect)) {
-      if (sel.closest(".el-form-item")?.textContent.includes(TEXT_KEYWORDS.declarationLabel)) {
-        if (await trySelectDeclaration(sel)) {
-          return onLog("创作声明已设置为「内容无需标注」（备用方案）");
-        }
+    const flat = findLabelElement(targets, maxLen);
+    dbg("平铺兜底", descEl(flat));
+    if (flat && flat !== labelEl) {
+      dispatchFullClickSequence(flat);
+      if (await isApplied()) {
+        onLog("创作声明已设置为「内容无需标注」（平铺选项）");
+        return;
       }
     }
-    onLog("提示: 创作声明可能已默认为「内容无需标注」，跳过");
+    onLog("提示: 未能自动设置创作声明，请在页面上手动选择");
+    try {
+      const near = [];
+      for (const el of document.querySelectorAll("div, span, label")) {
+        const t = (el.textContent || "").replace(/\s+/g, "");
+        if (!t.includes("声明") || t.length > 30) continue;
+        if (!isVisible(el)) continue;
+        near.push(descEl(el));
+        if (near.length >= 6) break;
+      }
+      dbg("失败快照·含「声明」元素:", near.length ? near.join(" ｜ ") : "(无)");
+      const sels = [];
+      for (const el of document.querySelectorAll('[class*="select"], [class*="dropdown"], [class*="option"], [class*="list"]')) {
+        if (!isVisible(el)) continue;
+        sels.push(descEl(el));
+        if (sels.length >= 8) break;
+      }
+      dbg("失败快照·下拉类元素:", sels.length ? sels.join(" ｜ ") : "(无)");
+      dbg("失败快照·bcc-select HTML:", (selectEl ? selectEl.outerHTML : "(无)").replace(/\s+/g, " ").slice(0, 900));
+    } catch (e) {
+    }
   }
   async function stepSetVisibility(onLog, targetText) {
     const text = targetText || "仅自己可见";
@@ -669,7 +768,7 @@
             container.click();
             onLog(`可见范围已设置为「${text}」`);
           }
-          await waitForStable({ maxMs: TIMEOUTS.visibilitySettle });
+          await sleep(TIMEOUTS.visibilitySettle);
           return;
         }
       }
@@ -683,13 +782,13 @@
         if (clickable) {
           clickable.click();
           onLog(`可见范围已设置为「${text}」（备用方案）`);
-          await waitForStable({ maxMs: TIMEOUTS.visibilitySettle });
+          await sleep(TIMEOUTS.visibilitySettle);
           return;
         }
       }
     }
     onLog(`提示: 未找到可见范围「${text}」，请手动设置`);
-    await waitForStable({ maxMs: TIMEOUTS.visibilitySettle });
+    await sleep(TIMEOUTS.visibilitySettle);
   }
 
   // src/content/core/mp4.js
@@ -1275,7 +1374,7 @@
       if (attempt > 1) {
         if (isCoverDialogClosed()) {
           onLog("封面弹窗已关闭");
-          await waitForStable({ maxMs: 500 });
+          await sleep(500);
           return;
         }
         btn = await waitFor(findConfirm, 5e3) || btn;
@@ -1289,7 +1388,7 @@
       const closed = await waitFor(isCoverDialogClosed, 5e3, 250);
       if (closed) {
         onLog("封面弹窗已关闭");
-        await waitForStable({ maxMs: 500 });
+        await sleep(500);
         return;
       }
     }
@@ -1307,11 +1406,11 @@
     }
     if (!coverBtn) {
       onLog("尝试通过页面结构定位封面区域...");
-      for (const label of BUTTON_LABELS.coverFallbackEntry) {
-        const labelEl = findExactTextElement(label);
-        if (!labelEl) continue;
-        const parent = labelEl.closest(".el-form-item") || labelEl.parentElement;
-        if (!parent) continue;
+      for (const el of document.querySelectorAll("*")) {
+        const directText = Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
+        if (!BUTTON_LABELS.coverFallbackEntry.includes(directText)) continue;
+        const parent = el.closest(".el-form-item") || el.parentElement;
+        if (!parent) break;
         coverBtn = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]');
         if (coverBtn) break;
         for (const item of parent.querySelectorAll("*")) {
@@ -1408,6 +1507,18 @@
     onLog(`找到封面 input: accept="${coverInput.getAttribute("accept") || "(无 accept)"}"`);
     setFileToInput(coverInput, coverFile);
     onLog("已设置封面文件，等待上传完成...");
+    const imageInputsNow = () => Array.from(document.querySelectorAll('input[type="file"]')).filter((inp) => (inp.getAttribute("accept") || "").toLowerCase().includes("image"));
+    const others = imageInputsNow().filter((inp) => inp !== coverInput);
+    if (others.length) {
+      onLog(`检测到 ${others.length + 1} 个封面比例入口，补齐其余比例...`);
+      for (const inp of others) {
+        setFileToInput(inp, coverFile);
+        await sleep(600);
+      }
+      onLog("两个比例的封面都已注入");
+    } else {
+      onLog("提示: 只找到 1 个封面入口，若提交报缺 16:9 封面请手动补一张");
+    }
     const uploaded = await waitForCoverUploaded();
     if (uploaded) {
       onLog("封面上传完成，预览图已显示");
@@ -1552,103 +1663,7 @@
     }
   }
 
-  // src/content/core/healthCheck.js
-  var BANNER_ID = "bili-helper-health";
-  function anyPresent(selectors) {
-    const list = Array.isArray(selectors) ? selectors : [selectors];
-    for (const sel of list) {
-      if (document.querySelector(sel)) return true;
-    }
-    return false;
-  }
-  function anyText(keyword) {
-    return (document.body?.textContent || "").includes(keyword);
-  }
-  var HEALTH_CHECKS = [
-    { id: "title", label: "标题输入框", critical: true, test: () => anyPresent(SELECTORS.titleAny) },
-    { id: "submit", label: "「立即投稿」按钮", critical: true, test: () => !!findButtonByText(BUTTON_LABELS.submit) },
-    { id: "coverEntry", label: "封面入口", critical: false, test: () => coverEntryExists() },
-    { id: "visibility", label: "可见范围选择器", critical: false, test: () => anyPresent(SELECTORS.visibilityName) },
-    {
-      id: "declaration",
-      label: "创作声明下拉",
-      critical: false,
-      test: () => anyPresent(SELECTORS.declarationSelect) || anyText(TEXT_KEYWORDS.declarationTarget)
-    }
-  ];
-  function coverEntryExists() {
-    for (const label of BUTTON_LABELS.coverEntry) {
-      if (findButtonByText(label)) return true;
-    }
-    return anyText("封面");
-  }
-  function runHealthCheck() {
-    const missing = [];
-    const criticalMissing = [];
-    for (const c of HEALTH_CHECKS) {
-      let ok = false;
-      try {
-        ok = !!c.test();
-      } catch (e) {
-        ok = false;
-      }
-      if (!ok) {
-        missing.push(c.label);
-        if (c.critical) criticalMissing.push(c.label);
-      }
-    }
-    return { ok: missing.length === 0, missing, criticalMissing };
-  }
-  function renderHealthBanner(result) {
-    const panel = document.getElementById("bili-helper-panel");
-    if (!panel) return;
-    let banner = document.getElementById(BANNER_ID);
-    if (result.ok) {
-      if (banner) banner.remove();
-      return;
-    }
-    const isCritical = result.criticalMissing.length > 0;
-    const text = isCritical ? `页面结构异常：未找到 ${result.criticalMissing.map((s) => `「${s}」`).join("、")}。B站可能已改版，本批次大概率失败，建议先更新扩展再传。` : `提示：未找到 ${result.missing.map((s) => `「${s}」`).join("、")}（有备用方案，若流程卡住可能是B站改版）`;
-    if (!banner) {
-      banner = document.createElement("div");
-      banner.id = BANNER_ID;
-      const body = panel.querySelector(".bili-helper-body") || panel;
-      body.insertBefore(banner, body.firstChild);
-    }
-    banner.style.cssText = [
-      "margin:8px 0",
-      "padding:8px 10px",
-      "border-radius:6px",
-      "font-size:12px",
-      "line-height:1.5",
-      isCritical ? "background:#fff1f0" : "background:#fffbe6",
-      isCritical ? "border:1px solid #ffa39e" : "border:1px solid #ffe58f",
-      isCritical ? "color:#a8071a" : "color:#874d00"
-    ].join(";");
-    banner.textContent = text;
-    banner.title = text;
-  }
-
   // src/content/flow.js
-  var healthChecked = false;
-  async function checkPageHealthOnce(onLog) {
-    if (healthChecked) return;
-    healthChecked = true;
-    await waitForStable({ maxMs: 800 });
-    let result = runHealthCheck();
-    if (!result.ok) {
-      await sleep(1500);
-      result = runHealthCheck();
-    }
-    renderHealthBanner(result);
-    if (result.ok) {
-      onLog("页面结构自检通过");
-    } else if (result.criticalMissing.length) {
-      onLog(`⚠️ 页面结构自检失败：未找到 ${result.criticalMissing.join("、")}，B站可能已改版`);
-    } else {
-      onLog(`提示: 页面结构自检缺失 ${result.missing.join("、")}（有备用方案，可继续）`);
-    }
-  }
   async function uploadAndSubmit(file, onLog, targetText) {
     const title = parseTitle(file.name);
     onLog(`视频: ${file.name}`);
@@ -1656,7 +1671,6 @@
     onLog("");
     await runStep("stepUploadFile", stepUploadFile, file, onLog);
     await runStep("stepWaitForForm", stepWaitForForm, onLog);
-    await checkPageHealthOnce(onLog);
     await runStep("stepSetTitle", stepSetTitle, title, onLog);
     await runStep("stepSetDeclaration", stepSetDeclaration, onLog);
     await runStep("stepSetVisibility", stepSetVisibility, onLog, targetText);
@@ -1668,7 +1682,6 @@
   }
   async function batchUpload(files, onLog, targetText) {
     onLog("提示: 投稿期间请保持本页面可见，最小化窗口会导致浏览器节流、提交可能卡住");
-    healthChecked = false;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       setCurrentStep({ name: `batchUpload-第${i + 1}个`, source: "" });
@@ -1729,9 +1742,22 @@
           const titleKeyword = file.name.replace(/\.mp4$/i, "");
           await waitForElementByText(titleKeyword, TIMEOUTS.waitForFormEditor);
           onLog("视频卡片已出现在队列中");
-          await waitForStable({ maxMs: TIMEOUTS.afterCardAppear });
+          await sleep(TIMEOUTS.afterCardAppear);
           onLog("点击视频卡片...");
-          const bestEl = findVisibleTextElement(titleKeyword);
+          let bestEl = null, bestSize = Infinity;
+          for (const el of document.querySelectorAll("*")) {
+            const text = el.textContent || "";
+            if (text.includes(titleKeyword) && text.length < 200) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 100 && rect.height > 30) {
+                const size = rect.width * rect.height;
+                if (size < bestSize) {
+                  bestSize = size;
+                  bestEl = el;
+                }
+              }
+            }
+          }
           if (!bestEl) throw new Error(`未能点击视频卡片: ${titleKeyword}`);
           const clickable = toClickable(bestEl);
           if (clickable && clickable !== bestEl) {
@@ -1750,7 +1776,7 @@
           onLog("已点击视频卡片");
           onLog("等待编辑页面加载...");
           await waitForElement(SELECTORS.titleAny.slice(0, 2), TIMEOUTS.waitForFormEditor);
-          await waitForStable({ maxMs: TIMEOUTS.afterFormLoad });
+          await sleep(TIMEOUTS.afterFormLoad);
           onLog("已进入编辑页面");
           await runStep("stepWaitForForm", stepWaitForForm, onLog);
           await runStep("stepSetDeclaration", stepSetDeclaration, onLog);
@@ -1769,12 +1795,13 @@
   }
 
   // src/content/ui/panel.js
+  var BUILD_TAG = "v7";
   function createPanel() {
     const panel = document.createElement("div");
     panel.id = "bili-helper-panel";
     panel.innerHTML = `
     <div class="bili-helper-header">
-      <span class="bili-helper-title">B站投稿助手</span>
+      <span class="bili-helper-title">B站投稿助手 · ${BUILD_TAG}</span>
       <button class="bili-helper-minimize" id="bili-helper-min">—</button>
     </div>
     <div class="bili-helper-body" id="bili-helper-body">
@@ -1893,6 +1920,7 @@
         logContent.textContent += msg + "\n";
         logContent.scrollTop = logContent.scrollHeight;
       };
+      onLog(`B站投稿助手 ${BUILD_TAG}`);
       setIsUploading(true);
       try {
         const visText = document.getElementById("bili-helper-visibility").value;

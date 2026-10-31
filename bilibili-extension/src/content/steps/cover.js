@@ -1,6 +1,6 @@
 // steps/cover.js - Step 6: 视频截帧 + 封面上传与确认（逻辑最重的一步）
-import { sleep, waitFor, waitForStable } from '../core/wait.js'
-import { findButtonByText, findButtonInScope, findCoverDialog, findExactTextElement, toClickable, dispatchClickSequence } from '../core/find.js'
+import { sleep, waitFor } from '../core/wait.js'
+import { findButtonByText, findButtonInScope, findCoverDialog, toClickable, dispatchClickSequence } from '../core/find.js'
 import { BUTTON_LABELS, TIMEOUTS, SELECTORS } from '../config.js'
 import { captureFrameWithWebCodecs } from '../core/webcodecsFrame.js'
 
@@ -270,7 +270,7 @@ export async function confirmCoverDialog(onLog) {
     if (attempt > 1) {
       if (isCoverDialogClosed()) {
         onLog('封面弹窗已关闭')
-        await waitForStable({ maxMs: 500 })
+        await sleep(500)
         return
       }
       btn = (await waitFor(findConfirm, 5000)) || btn
@@ -285,7 +285,7 @@ export async function confirmCoverDialog(onLog) {
     const closed = await waitFor(isCoverDialogClosed, 5000, 250)
     if (closed) {
       onLog('封面弹窗已关闭')
-      await waitForStable({ maxMs: 500 })
+      await sleep(500)
       return
     }
   }
@@ -308,12 +308,12 @@ export async function stepSetCover(file, onLog) {
   }
   if (!coverBtn) {
     onLog('尝试通过页面结构定位封面区域...')
-    // 按候选文案用文本节点查找（不再全页 querySelectorAll('*')）
-    for (const label of BUTTON_LABELS.coverFallbackEntry) {
-      const labelEl = findExactTextElement(label)
-      if (!labelEl) continue
-      const parent = labelEl.closest('.el-form-item') || labelEl.parentElement
-      if (!parent) continue
+    for (const el of document.querySelectorAll('*')) {
+      const directText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+      if (!BUTTON_LABELS.coverFallbackEntry.includes(directText)) continue
+      const parent = el.closest('.el-form-item') || el.parentElement
+      if (!parent) break
       coverBtn = parent.querySelector('[style*="cursor: pointer"], [class*="cover"], [class*="btn"]')
       if (coverBtn) break
       for (const item of parent.querySelectorAll('*')) {
@@ -417,6 +417,24 @@ export async function stepSetCover(file, onLog) {
   onLog(`找到封面 input: accept="${coverInput.getAttribute('accept') || '(无 accept)'}"`)
   setFileToInput(coverInput, coverFile)
   onLog('已设置封面文件，等待上传完成...')
+
+  // ---- 5b. 补齐另一个比例的封面 ----
+  // 2026-10 改版：封面要求同时配置「首页推荐 4:3」和「个人空间 16:9」两个比例，
+  // 各自对应一个隐藏的 image input。只注入第一个会漏掉另一个，
+  // 提交时 B站会报「请上传首页推荐4:3封面～」/「请上传个人空间16:9封面～」。
+  const imageInputsNow = () => Array.from(document.querySelectorAll('input[type="file"]'))
+    .filter((inp) => (inp.getAttribute('accept') || '').toLowerCase().includes('image'))
+  const others = imageInputsNow().filter((inp) => inp !== coverInput)
+  if (others.length) {
+    onLog(`检测到 ${others.length + 1} 个封面比例入口，补齐其余比例...`)
+    for (const inp of others) {
+      setFileToInput(inp, coverFile)
+      await sleep(600)
+    }
+    onLog('两个比例的封面都已注入')
+  } else {
+    onLog('提示: 只找到 1 个封面入口，若提交报缺 16:9 封面请手动补一张')
+  }
 
   // ---- 6. 真正等待封面上传完成（动态查询弹窗，避免 Vue 重渲染导致引用失效）----
   const uploaded = await waitForCoverUploaded()

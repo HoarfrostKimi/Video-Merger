@@ -23,8 +23,10 @@ export const SELECTORS = {
   visibilityContainer: '.check-radio-v2-container',
   visibilityBox: '.check-radio-v2-box',
   // 创作声明下拉
-  declarationSelect: '.el-select',
-  declarationTrigger: '.el-select__wrapper, .el-input__inner',
+  // 2026 改版：该项改为必填，组件可能不再用 el-select（B站自研 bcc-* 组件），
+  // 标签文案也可能带「*」「（必填）」等后缀，所以选择器放宽、文案改为关键词匹配
+  declarationSelect: '.el-select, .bcc-select, [class*="select"]',
+  declarationTrigger: '.el-select__wrapper, .el-input__inner, [class*="select__wrapper"], [class*="select-inner"], [class*="trigger"]',
   declarationFormItem: '.el-form-item, tr, [class*="row"], [class*="item"]',
   // 文件上传入口
   fileInputSelectors: [
@@ -71,8 +73,13 @@ export const BUTTON_LABELS = {
 }
 
 export const TEXT_KEYWORDS = {
-  declarationTarget: '内容无需标注',
-  declarationLabel: '创作声明',
+  // 目标选项（任一命中即可）。2026 改版把「内容无需标注」缩成「无需标注」，
+  // 早期版本还有「不添加创作声明」，都留着，避免每次改文案就得改代码
+  declarationTarget: ['内容无需标注', '无需标注', '不添加创作声明', '内容无需添加声明'],
+  // 表单项标签（含「必填」标记时也能命中）
+  declarationLabel: ['创作声明', '创作者声明'],
+  // 标签与目标文案的最大字符数：超过这个长度的元素视为说明段落，不当成标签/选项
+  declarationTextLimit: 16,
   coverFeatures: ['上传封面', '拖拽图片', '更换封面', '封面制作', '封面编辑', '封面裁剪', '裁剪封面'],
   submitProgress: ['投稿中', '正在提交'],
 }
